@@ -261,7 +261,8 @@ src/
 └── scenes/                 # Cinematic scene director
 ```
 
-See [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md) for the authoritative runtime reference.
+See [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md) for the authoritative runtime reference,
+and [`ROADMAP.md`](ROADMAP.md) for where this fork is headed.
 
 ---
 
