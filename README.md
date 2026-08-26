@@ -61,6 +61,10 @@ The live layers are grounded in public feeds: the airliner crossing your screen 
 
 Requires Node.js 24.14.x or 26.x (enforced by `package.json`).
 
+> **Setting this up for the first time?** [SETUP.md](SETUP.md) is the operator's
+> checklist — every key you need, which four Google Cloud APIs to enable, and what
+> visibly breaks without each one.
+
 1. Copy `.env.example` → `.env` and set `GOOGLE_MAPS_API_KEY`.
 2. Install and run:
 
