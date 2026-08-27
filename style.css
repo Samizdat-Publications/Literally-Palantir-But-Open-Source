@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════
-   GOD'S EYE VIEW — Dark Sci-Fi UI
+   KEYHOLE — Dark Sci-Fi UI
    Apple meets Blade Runner
    ═══════════════════════════════════════════════ */
 
@@ -655,7 +655,7 @@ body.cockpit-mode #cockpit-cloud-effects.active {
   cursor: grabbing;
 }
 
-.panel-drag-handle.compact {
+.panel-drag-pill {
   margin-left: auto;
   margin-bottom: 2px;
   padding: 2px 8px;
@@ -668,7 +668,7 @@ body.cockpit-mode #cockpit-cloud-effects.active {
   color: var(--text-dim);
 }
 
-.panel-drag-handle.compact:hover {
+.panel-drag-pill:hover {
   color: var(--text-primary);
   border-color: var(--glass-border-hover);
 }

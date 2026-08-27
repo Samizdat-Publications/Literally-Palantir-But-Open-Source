@@ -81,10 +81,31 @@ question resolves as: Realtime parses intent → **local JS filters** → Realti
 narrates. Making the analyst smarter is not a provider swap; there is no call to
 swap. See `ROADMAP.md` → Decisions.
 
-**Panel dragging already exists.** `src/ui.js` has z-promotion, viewport
-clamping, `localStorage` position persistence and resize re-clamping — wired to
-exactly one panel (`pp-toggles`) via the `dragSpecs` list in `_initPanelDrag`.
-Extending it to the other ~13 panels is registration work, not new machinery.
+**Panel dragging is live — and was dormant for a subtle reason.** `src/ui.js`
+shipped the whole system (z-promotion, viewport clamping, `localStorage`
+persistence, resize re-clamping) but `_initPanelDrag` looked up a
+`.panel-drag-handle` element that `index.html` never contained. The lookup
+returned `null`, the spec was filtered out, and **no panel was draggable at
+all**. Handles now exist on seven panels, listed in `DRAGGABLE_PANEL_IDS`.
+`src/panelDragRegistry.test.mjs` fails if a registered panel loses its handle
+or a handle appears with no registration.
+
+`control-panel` and `location-bar` are deliberately excluded: control-panel's
+header is a `<button>`, which the drag handler's interactive-element guard
+rejects by design, and location-bar is dock-anchored with no header row.
+
+**Brand strings resolve from `src/brand.js`.** Renaming once cost a sweep across
+nine files, so runtime strings import from there. Two spots cannot: `index.html`
+is static markup served before any module evaluates, so its `<title>` and `<h1>`
+wordmark are literals — `BRAND_STATIC_MARKUP_SITES` lists them.
+
+**The voice tool schema is frozen by SHA-256.** `src/firstRunExperience.test.mjs`
+hashes the `GEV_REALTIME_TOOLS` block in `vite.config.js` and asserts an exact
+byte length and digest, because a schema edit busts the Realtime session cache.
+Tool *descriptions* inside that block still say "God's Eye View" on purpose —
+they are routing hints for the model, not user-visible identity, and rebranding
+them would have broken the freeze for no functional gain. The agent's identity
+string (the system prompt) sits outside the block and *is* rebranded.
 
 **Endpoints for unset keys return 503 by design.** `/api/firms`,
 `/api/ais-live`, `/api/realtime/token` all do this. It is the proxy declining to
