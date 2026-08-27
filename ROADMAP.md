@@ -3,6 +3,10 @@
 Wants recorded for after the base platform is fully stood up. Nothing here is
 scheduled or started; this file exists so the intent survives between sessions.
 
+**Decisions already taken** are recorded in "Decisions" at the foot of this
+file — the fork's name, the AI provider split, and two corrections to earlier
+assumptions. Read that section before planning work.
+
 The through-line: this platform is meant to become the **single home for
 research that currently lives in static HTML dashboards**. Each project below is
 a set of layers over the same globe rather than a separate site.
@@ -88,3 +92,78 @@ first sighting layer is written rather than retrofitted after.
 The Space Missions layer is the closest existing precedent: it replays a launch
 along a reconstructed timeline at 0.25×–4×, labelled as an estimate. That is a
 useful model for both the playback controls and the honesty about data quality.
+
+
+---
+
+# Decisions
+
+Settled calls, with the reasoning, so they are not relitigated later.
+
+## The fork is named KEYHOLE
+
+Chosen for precision at both ends. **KEYHOLE** was the real designation of the
+US photographic-reconnaissance satellite program (the KH series, beginning with
+CORONA) — the thing this app's aesthetic is quoting. It was also the name of
+**Keyhole Inc.**, the In-Q-Tel-backed company Google acquired, whose product
+became Google Earth: the direct technical ancestor of the photorealistic 3D
+tiles rendered here. The name is accurate about the genre *and* about the
+lineage of the rendering stack.
+
+The upstream project is "God's Eye View" by Bilawal Sidhu. Renaming the fork is
+correct etiquette — it stops this build being mistaken for theirs — but the
+**credit stays**: `LICENSE` travels with the code, `FORK-NOTES.md` records
+provenance, and every data attribution in `DATA_SOURCES.md` and
+`src/data/dataCredits.js` is untouched by branding work.
+
+**Requirement: the name must stay cheap to change.** Brand strings are to be
+centralised rather than scattered, so a future rename is a small edit and not
+another sweep. The internal `gev-` CSS class and DOM-id prefix is **not**
+branding — it is 218+ internal identifiers and must be left alone.
+
+## AI provider split
+
+Three providers, each doing the thing it is actually good at:
+
+| Concern | Provider | Why |
+|---|---|---|
+| Voice in / voice out, and intent → tool call | **OpenAI Realtime** | Speech-to-speech in one model. Anthropic has no realtime audio API; a STT → LLM → TTS pipeline would add 1–2s of latency to a drone-operator interface. |
+| Counting, filtering, spatial queries | **No model — local JS** | See the correction below. Deterministic and cannot hallucinate. |
+| HUD summary, and future deep analysis | **Gemini** | Free-tier credits available, and fast models are well suited to a short text call. |
+
+The interactive path should stay on fast models whatever the vendor; latency is
+a feature when the globe is meant to answer instantly. Reserve a frontier model
+for the correlation-engine reasoning, which is genuine multi-step analysis over
+messy evidence rather than routing.
+
+Build the analysis path **provider-agnostic** so the model is a config value and
+comparisons are cheap.
+
+## Correction: the analyst engine does not use an LLM
+
+`src/data/analystEngine.js` is pure local query logic over the record arrays
+already held client-side. Its own header states it: *"the engine never
+fetches."*
+
+So "how many flights are over Texas?" resolves as: OpenAI Realtime parses the
+intent into a tool call → **local JavaScript does the filtering** → Realtime
+narrates the result. There is no LLM in the analysis step to redirect.
+
+This matters for planning: making the analyst *smarter* is not a provider swap,
+because there is no call to swap. It means either extending the engine, or
+**adding** a reasoning layer that consumes the engine's structured output. The
+HUD summary (`/api/openai/hud-summary`) is the only isolated text call that a
+provider swap actually applies to, which makes it the natural first target.
+
+## Correction: panel dragging already exists
+
+`src/ui.js` already implements drag-to-reposition — z-order promotion on click,
+viewport clamping, per-panel position persisted to `localStorage`, and
+re-clamping on resize. It is wired to exactly **one** panel (`pp-toggles`),
+with a comment recording the upstream intent: *"The right rail and left
+accordion remain fixed so their HUD alignment is deterministic."*
+
+Making the other ~13 panels draggable is therefore an extension of a tested
+system, not new machinery: add handles, register them in `dragSpecs`, and switch
+rail-anchored panels to free positioning on first drag. A "reset layout" control
+should land in the same change, because free-floating panels do get lost.
