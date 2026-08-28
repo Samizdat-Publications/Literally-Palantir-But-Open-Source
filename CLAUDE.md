@@ -164,6 +164,13 @@ official-bucket origin as the still, opt-out via `CCTV_TFL_VIDEO=0`.
 Austin and Caltrans publish stills only. There is no video to unlock there, so
 any "show me live video" request means London.
 
+## Where to pick up
+
+`ROADMAP.md` → **Open items** is the live queue. The next build is the weather
+radar layer: approved, spec'd, and every API shape in
+`docs/WEATHER-RADAR-SPEC.md` was verified against the live service rather than
+recalled — RainViewer is free and keyless, so there is nothing to obtain first.
+
 ## Conventions
 
 - Match surrounding style. The codebase uses thorough JSDoc headers explaining

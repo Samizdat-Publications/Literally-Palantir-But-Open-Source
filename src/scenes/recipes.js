@@ -440,6 +440,48 @@ export const SCENE_RECIPES = [
       { lat: 20.0, lon: 170.0, alt: 16000000, heading: 0, pitch: -76, roll: 0, duration: 6, hold: 0 },
     ],
   },
+
+  {
+    id: 'california-eyes',
+    title: 'California Eyes — Bay Area and LA Cameras',
+    durationSec: 36,
+    style: 'retro',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    // Caltrans districts 4 (Bay Area) and 7 (LA) are both in the default
+    // district set, so these cameras are present without extra config.
+    // NOTE: Caltrans publishes stills, not video — only London serves clips.
+    layers: {
+      cctv: true,
+      traffic: true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 48, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // Bay Bridge western approach into downtown SF — the densest camera
+      // cluster in District 4 and strong photorealistic coverage.
+      { lat: 37.7920, lon: -122.3950, alt: 3200, heading: 250, pitch: -28, roll: 0, duration: 6, hold: 2 },
+      // Financial District at building height.
+      { lat: 37.7930, lon: -122.4010, alt: 900, heading: 40, pitch: -20, roll: 0, duration: 6, hold: 2 },
+      // The 101/280 split south of downtown — freeway cameras, heavy flow.
+      { lat: 37.7500, lon: -122.4050, alt: 5200, heading: 180, pitch: -34, roll: 0, duration: 5, hold: 2 },
+      // Down the state to LA.
+      { lat: 35.50, lon: -120.00, alt: 900000, heading: 150, pitch: -58, roll: 0, duration: 5, hold: 1 },
+      // Downtown LA and the four-level interchange — District 7's core.
+      { lat: 34.0522, lon: -118.2437, alt: 3000, heading: 25, pitch: -26, roll: 0, duration: 6, hold: 2 },
+      { lat: 34.0700, lon: -118.2350, alt: 1600, heading: 200, pitch: -22, roll: 0, duration: 6, hold: 2 },
+    ],
+  },
 ];
 
 export function getSceneRecipeById(id) {

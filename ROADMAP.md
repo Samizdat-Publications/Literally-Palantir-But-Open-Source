@@ -177,7 +177,7 @@ Carried forward. Nothing here is blocked on anything but a decision.
 
 | # | Item | Notes |
 |---|---|---|
-| 1 | **Weather radar layer** | Wanted, not built. Needs a tile proxy, a layer module, attribution in **both** `DATA_SOURCES.md` and `dataCredits.js`, and a UI toggle. RainViewer is the obvious source — free, keyless, global, ~10-minute animation loop. Pairs naturally with the fire tour. |
+| 1 | **Weather radar layer** | **Approved — build next.** Full spec with live-verified API shapes, URLs and gotchas: [`docs/WEATHER-RADAR-SPEC.md`](docs/WEATHER-RADAR-SPEC.md). RainViewer, free and keyless, so nothing to add to `.env`. |
 | 2 | **Docs brand pass** | 13 `.md` files still say "God's Eye View". Some **must** keep it — `FORK-NOTES.md`, `DATA_SOURCES.md`, `public/models/README.md`, and the media-attribution line in `README.md` are provenance. The rest are stale product references (e.g. `docs/opensky-auth.md`). |
 | 3 | **Verify the Gemini model id** | `gemini-3.1-pro-preview` is unconfirmed — Google validates auth before the model, so an invalid key cannot test it. First real HUD summary will say. `GEMINI_HUD_SUMMARY_MODEL` overrides without a code change. |
 | 4 | **Node 24.14+ on the operator's machine** | Currently 24.13.1, below the `engines` floor. Runs, warns `EBADENGINE`. |
