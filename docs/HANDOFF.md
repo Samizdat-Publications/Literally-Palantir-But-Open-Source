@@ -45,6 +45,65 @@ It carries everything below.
    path is done; the UI path is not.
 4. Then the rest of `ROADMAP.md` → Open items.
 
+## Bing/ion 401 — open, diagnosed but not resolved
+
+The operator reports the Bing basemap chips failing with
+`REQUEST HAS FAILED. STATUS CODE: 401`, "despite having the API key".
+
+**The chip labels are misleading and that is the whole confusion.** There is no
+Bing Maps key anywhere in this app. `src/mapStackController.js` defines
+`bing-aerial` and `bing-labels` as `Cesium.IonWorldImageryStyle.AERIAL` /
+`AERIAL_WITH_LABELS` — **Cesium ion World Imagery**, authenticated with
+`CESIUM_ION_TOKEN`. They say "Bing" only because ion's imagery was historically
+Bing-sourced.
+
+A 401 therefore means the token reached the browser and **ion refused it** — not
+that a Bing key is missing. If no token were configured at all, the app
+short-circuits earlier with "Cesium ion token required for Bing stacks", which
+is not what the operator saw.
+
+The toast now translates this instead of surfacing Cesium's raw string; see
+`_activationErrorMessage` and `src/mapStackIonError.test.mjs`.
+
+**Ranked causes.** Most likely first, and the first one fits the operator's own
+words exactly:
+
+1. A **Bing Maps or Google Maps key** was pasted into `CESIUM_ION_TOKEN`. Same
+   class of mistake as a Maps Platform key not working against Gemini.
+2. The token was **truncated** on the way into `.env` — ion tokens are long JWTs.
+3. The token lacks **`assets:read`**, or is restricted to an asset allowlist
+   that excludes World Imagery. Note this usually returns **403**, not 401.
+4. The token was revoked, or belongs to a deleted ion account.
+
+**Diagnostic — run this on the operator's machine.** Both endpoints were
+verified live on 2026-08-28: a bogus token returns `401` from `/v1/me`, and
+`{"code":"INVALID_TOKEN","message":"Invalid access token"}` from the asset
+endpoint.
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
+"token length: $($t.Length)"
+$t.Substring(0,6)
+curl.exe -s -o NUL -w "me: %{http_code}`n" "https://api.cesium.com/v1/me?access_token=$t"
+curl.exe -s -w "`nassets: %{http_code}`n" "https://api.cesium.com/v1/assets/2/endpoint?access_token=$t"
+```
+
+Reading the result:
+
+- **`me: 200`, `assets: 200`** — the token is fine and the fault is client-side.
+  Look at `import.meta.env.CESIUM_ION_TOKEN` (defined in `vite.config.js`) and
+  whether the dev server was restarted after `.env` changed. Vite bakes it at
+  build time; editing `.env` with the server running changes nothing.
+- **`me: 401`** — the token itself is rejected. Cause 1, 2 or 4. Mint a fresh
+  one at cesium.com/ion/tokens.
+- **`me: 200`, `assets: 401/403`** — cause 3. Fix the scope, do not rotate.
+- **A short token, or one starting `AIza`** — that is a Google key, not an ion
+  token. Cause 1, confirmed.
+
+Ion tokens begin `eyJ` (they are JWTs). Do not paste the token into chat; the
+length and first six characters are enough to tell.
+
 ## Things that will cost you a cycle
 
 **The voice tool schema is byte-frozen.** `src/firstRunExperience.test.mjs`

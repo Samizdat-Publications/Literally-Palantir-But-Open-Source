@@ -137,6 +137,13 @@ encoder. The catch is that restore is boot-scoped (`_initialRestorePending`,
 still. Austin and Caltrans are hardcoded `feedType: 'image'` in
 `vite.config.js`. Any tour or demo promising moving pictures has to be London.
 
+**There is no Bing Maps key.** The `bing-aerial` / `bing-labels` chips are
+`Cesium.IonWorldImageryStyle` — **Cesium ion World Imagery**, authenticated with
+`CESIUM_ION_TOKEN`. They say "Bing" only because ion's imagery was historically
+Bing-sourced. A 401 on those chips is ion refusing the ion token, not a missing
+Bing key, and sending someone to the Bing Maps console wastes their afternoon.
+`_activationErrorMessage` in `src/mapStackController.js` translates it.
+
 **Endpoints for unset keys return 503 by design.** `/api/firms`,
 `/api/ais-live`, `/api/realtime/token` all do this. It is the proxy declining to
 call upstream, not a fault.
