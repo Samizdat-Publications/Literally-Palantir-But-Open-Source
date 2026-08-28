@@ -3443,6 +3443,17 @@ const CALTRANS_ANCHORS = [
 /** TfL JamCams: one keyless list endpoint; frames live on a public S3 bucket. */
 const TFL_JAMCAM_URL = 'https://api.tfl.gov.uk/Place/Type/JamCam';
 const TFL_IMAGE_ORIGIN = 'https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/';
+
+/**
+ * Whether London JamCams serve their rolling video clip instead of a still.
+ * Opt-out (CCTV_TFL_VIDEO=0) rather than opt-in: video is what the cameras
+ * actually publish, and every one of them has a clip.
+ * @param {NodeJS.ProcessEnv} [env] - Injected for testing.
+ * @returns {boolean}
+ */
+export function tflVideoEnabled(env = process.env) {
+  return String(env.CCTV_TFL_VIDEO ?? '1').trim() !== '0';
+}
 const DEFAULT_TFL_MAX_SOURCES = 250;
 const LONDON_CENTER = { lat: 51.5074, lon: -0.1278 };
 /** Camera CATALOGS change rarely; 15 min keeps multi-megabyte upstream list refetches (Austin rows.json + 4 Caltrans districts + TfL) infrequent. Frames are fetched per-request and are unaffected. */
@@ -4028,6 +4039,13 @@ async function loadTflSourcesFromOpenData() {
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const imageUrl = String(props.imageUrl || '');
       if (!imageUrl.startsWith(TFL_IMAGE_ORIGIN)) continue; // official-bucket pin
+      // TfL publishes a short rolling .mp4 beside every still, on the same
+      // bucket. Pin it to that origin too, so a video URL is held to exactly
+      // the same trust boundary as the image it replaces.
+      const rawVideoUrl = String(props.videoUrl || '');
+      const videoUrl = (tflVideoEnabled() && rawVideoUrl.startsWith(TFL_IMAGE_ORIGIN))
+        ? rawVideoUrl
+        : '';
 
       // "JamCams_00002.00865" → "tfl-00002.00865" (provider-stable id).
       const rawId = String(place?.id || '').replace(/^JamCams_/, '');
@@ -4051,8 +4069,11 @@ async function loadTflSourcesFromOpenData() {
         rangeM: 145,
         mountHeightM: 8,
         groundElevationM: 15, // Thames-basin prior; one-shot snap corrects.
-        feedType: 'image', // stills-first (product rule); props.videoUrl deliberately unused
-        url: imageUrl,
+        // Upstream shipped this stills-only with props.videoUrl unused. Video
+        // is opt-out via CCTV_TFL_VIDEO=0: the still remains as snapshotUrl, so
+        // a camera whose clip fails still has a frame to fall back to.
+        feedType: videoUrl ? 'mp4' : 'image',
+        url: videoUrl || imageUrl,
         snapshotUrl: imageUrl,
         sourceKind: 'tfl-open-data',
         license: 'Powered by TfL Open Data',

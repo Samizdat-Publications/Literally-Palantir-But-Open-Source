@@ -201,12 +201,24 @@ test('an isolating context mode must be exited before a shot applies', () => {
   assert.equal(sceneRequiresContextModeExit(undefined), false);
 });
 
-test('shipped recipes touch only their four declared layers', () => {
+test('shipped recipes touch only the layers they declare', () => {
+  // The equality below is the real guard: every id a recipe declares must
+  // survive sceneLayerPlan, which drops unregistered ids silently. A typo in a
+  // recipe is otherwise invisible — the layer just never gets set.
+  //
+  // The old form also capped this at 4, from when the app shipped four data
+  // layers. The demo tours deliberately declare every registered layer so they
+  // can turn the irrelevant ones OFF, which is what this module's own guidance
+  // asks for ("shots should declare the layers they want OFF"). The cap now
+  // tracks the registry instead of a literal.
   for (const recipe of SCENE_RECIPES) {
     const declared = Object.entries(recipe.layers || {})
       .map(([id, enabled]) => [id, { enabled }]);
     const plan = sceneLayerPlan(Object.fromEntries(declared), REGISTERED);
     assert.equal(plan.length, Object.keys(recipe.layers || {}).length, recipe.id);
-    assert.ok(plan.length <= 4, `${recipe.id} should not reach beyond its declared layers`);
+    assert.ok(
+      plan.length <= REGISTERED.size,
+      `${recipe.id} should not reach beyond its declared layers`,
+    );
   }
 });

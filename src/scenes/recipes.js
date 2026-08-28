@@ -159,6 +159,237 @@ export const SCENE_RECIPES = [
       { lat: 5.0, lon: 30.0, alt: 18000000, heading: -8, pitch: -78, roll: 0, duration: 6, hold: 0 },
     ],
   },
+
+  // ---------------------------------------------------------------------
+  // Demo tours. Each declares EVERY layer it does not want, because
+  // sceneLayerPlan only touches layers a shot names — an undeclared layer
+  // keeps whatever state it had, which on a loaded globe means a tour
+  // inherits someone else's performance problem.
+  //
+  // Fire coordinates were taken from a live NASA FIRMS query rather than
+  // guessed; see the tour comments for the detection counts at capture time.
+  // Fires move, so these are "the region that burns", not a promise.
+  // ---------------------------------------------------------------------
+  {
+    id: 'fireline-cascadia',
+    title: 'Fire Line — Pacific Northwest',
+    durationSec: 34,
+    style: 'thermal',
+    ui: { hidePanels: true, hudMode: 'full', safeFrame: '16:9' },
+    // Fires only. Everything else off — this is the cheapest tour to run and
+    // the thermal palette reads best against an otherwise empty globe.
+    layers: {
+      'local-firms': true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      traffic: false,
+      cctv: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 70, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // Regional establishing shot over the Cascades and Columbia basin.
+      { lat: 46.5, lon: -119.5, alt: 1400000, heading: 12, pitch: -62, roll: 0, duration: 6, hold: 1 },
+      // Okanogan / Colville, north-central Washington. The dominant complex in
+      // the capture: 197 detections, ~2,491 MW total radiative power in 24h.
+      { lat: 48.913, lon: -119.807, alt: 210000, heading: 24, pitch: -45, roll: 0, duration: 6, hold: 2 },
+      { lat: 48.913, lon: -119.807, alt: 42000, heading: 40, pitch: -32, roll: 0, duration: 5, hold: 2 },
+      // Clearwater country, Idaho — fewer detections but far hotter per pixel
+      // (~1,754 MW from 20), so the thermal ramp separates them visibly.
+      { lat: 46.028, lon: -116.066, alt: 90000, heading: -18, pitch: -38, roll: 0, duration: 5, hold: 2 },
+      // Pull back out to show the whole burning arc at once.
+      { lat: 46.8, lon: -118.0, alt: 1900000, heading: 0, pitch: -70, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'orbital-ascent',
+    title: 'Orbital — Satellites and Launch Sites',
+    durationSec: 36,
+    style: 'surveillance',
+    ui: { hidePanels: true, hudMode: 'full', safeFrame: '16:9' },
+    layers: {
+      satellites: true,
+      'rocket-launches': true,
+      flights: false,
+      military: false,
+      earthquakes: false,
+      traffic: false,
+      cctv: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 60, sharpen: false, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // Start high enough that the whole constellation shell is visible.
+      { lat: 12.0, lon: -60.0, alt: 24000000, heading: 0, pitch: -84, roll: 0, duration: 7, hold: 2 },
+      // Cape Canaveral / Kennedy — the densest launch cadence on the planet.
+      { lat: 28.489, lon: -80.578, alt: 320000, heading: 18, pitch: -48, roll: 0, duration: 6, hold: 2 },
+      { lat: 28.585, lon: -80.650, alt: 26000, heading: 70, pitch: -28, roll: 0, duration: 5, hold: 2 },
+      // Vandenberg — the polar-orbit pad, and a completely different coastline.
+      { lat: 34.742, lon: -120.572, alt: 120000, heading: -30, pitch: -40, roll: 0, duration: 5, hold: 1 },
+      // Back to orbit height to close on the shell.
+      { lat: 20.0, lon: -100.0, alt: 20000000, heading: 10, pitch: -80, roll: 0, duration: 6, hold: 0 },
+    ],
+  },
+  {
+    id: 'london-eyes',
+    title: 'London — Live Street Cameras',
+    durationSec: 34,
+    style: 'retro',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    // London is the one camera network that serves real video rather than
+    // stills, and Google's photorealistic coverage of the centre is dense.
+    layers: {
+      cctv: true,
+      traffic: true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 46, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      { lat: 51.505, lon: -0.120, alt: 14000, heading: 20, pitch: -50, roll: 0, duration: 6, hold: 1 },
+      // Westminster / Parliament Square — heavy JamCam density, strong 3D.
+      { lat: 51.5010, lon: -0.1246, alt: 1200, heading: 45, pitch: -26, roll: 0, duration: 6, hold: 2 },
+      // Piccadilly and the West End.
+      { lat: 51.5100, lon: -0.1340, alt: 900, heading: 110, pitch: -22, roll: 0, duration: 5, hold: 2 },
+      // Tower Bridge — the most recognisable frame in the set.
+      { lat: 51.5055, lon: -0.0754, alt: 800, heading: 300, pitch: -20, roll: 0, duration: 6, hold: 2 },
+      { lat: 51.508, lon: -0.100, alt: 9000, heading: 15, pitch: -45, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'harbor-watch',
+    title: 'Harbor Watch — New York and the Approaches',
+    durationSec: 32,
+    style: 'noir',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    layers: {
+      'ais-live-vessels': true,
+      cctv: true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      traffic: false,
+      radio: false,
+      bikeshare: false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 52, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // The Narrows, looking up-harbour into Manhattan.
+      { lat: 40.606, lon: -74.045, alt: 26000, heading: 20, pitch: -52, roll: 0, duration: 6, hold: 1 },
+      // Lower Manhattan at building height — the strongest 3D in the app.
+      { lat: 40.7040, lon: -74.0135, alt: 1100, heading: 35, pitch: -20, roll: 0, duration: 6, hold: 2 },
+      // Container terminals at Bayonne / Newark Bay, where the AIS density is.
+      { lat: 40.670, lon: -74.145, alt: 6500, heading: 300, pitch: -34, roll: 0, duration: 5, hold: 2 },
+      // Ambrose Channel approach — the inbound queue, out to sea.
+      { lat: 40.480, lon: -73.900, alt: 60000, heading: 200, pitch: -48, roll: 0, duration: 5, hold: 1 },
+      { lat: 40.65, lon: -74.05, alt: 180000, heading: 10, pitch: -62, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'approach-and-intercept',
+    title: 'Approach and Intercept — LAX to Nellis',
+    durationSec: 36,
+    style: 'retro',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    layers: {
+      flights: true,
+      military: true,
+      traffic: true,
+      cctv: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': true,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 54, sharpen: true, detectionMode: 'DENSE' },
+    cameraPath: [
+      // LAX finals — four parallel runways, constant traffic, excellent 3D.
+      { lat: 33.9416, lon: -118.4085, alt: 4200, heading: 90, pitch: -28, roll: 0, duration: 6, hold: 2 },
+      // Down the approach corridor over the terminals.
+      { lat: 33.9440, lon: -118.3830, alt: 1400, heading: 265, pitch: -14, roll: 0, duration: 5, hold: 2 },
+      // Pull east across the basin.
+      { lat: 34.20, lon: -117.30, alt: 320000, heading: 55, pitch: -50, roll: 0, duration: 5, hold: 1 },
+      // Nellis AFB and the Las Vegas basin — military traffic against dense 3D.
+      { lat: 36.2360, lon: -115.0343, alt: 26000, heading: 30, pitch: -38, roll: 0, duration: 6, hold: 2 },
+      // The Strip, because it renders absurdly well.
+      { lat: 36.1147, lon: -115.1728, alt: 1300, heading: 20, pitch: -22, roll: 0, duration: 6, hold: 2 },
+    ],
+  },
+  {
+    id: 'airborne-all-the-way',
+    title: 'Airborne All The Way — Sill, Benning, Bragg',
+    durationSec: 40,
+    style: 'retro',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    layers: {
+      military: true,
+      'military-installations': true,
+      flights: true,
+      cctv: false,
+      traffic: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 50, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // Fort Sill, Lawton OK — Basic and AIT. The artillery post, opening wide
+      // enough to read the ranges north of the cantonment.
+      { lat: 34.6592, lon: -98.4023, alt: 34000, heading: 15, pitch: -46, roll: 0, duration: 6, hold: 2 },
+      { lat: 34.6490, lon: -98.3870, alt: 3200, heading: 60, pitch: -22, roll: 0, duration: 5, hold: 2 },
+      // Fort Benning, Columbus GA — Airborne School. Framed on Lawson Army
+      // Airfield and the jump towers rather than main post.
+      { lat: 32.3370, lon: -84.9880, alt: 12000, heading: 300, pitch: -34, roll: 0, duration: 6, hold: 2 },
+      { lat: 32.3526, lon: -84.9691, alt: 2600, heading: 20, pitch: -20, roll: 0, duration: 5, hold: 2 },
+      // Fort Bragg, Fayetteville NC — 82nd Airborne, 3rd BCT, 1-505 PIR.
+      { lat: 35.1410, lon: -79.0060, alt: 30000, heading: 340, pitch: -44, roll: 0, duration: 6, hold: 2 },
+      // Sicily and Normandy drop zones, west of main post.
+      { lat: 35.1700, lon: -79.1000, alt: 9000, heading: 280, pitch: -28, roll: 0, duration: 5, hold: 2 },
+      { lat: 34.5, lon: -87.0, alt: 2400000, heading: 20, pitch: -66, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
 ];
 
 export function getSceneRecipeById(id) {
