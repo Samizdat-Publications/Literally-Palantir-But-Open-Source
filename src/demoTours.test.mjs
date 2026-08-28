@@ -10,7 +10,19 @@ import { SCENE_RECIPES, getSceneRecipeById } from './scenes/recipes.js';
 const TOUR_IDS = [
   'fireline-cascadia', 'orbital-ascent', 'london-eyes',
   'harbor-watch', 'approach-and-intercept', 'airborne-all-the-way',
-  'world-service', 'california-eyes',
+  'world-service', 'california-eyes', 'london-river-watch',
+  'london-landmarks', 'california-landmarks', 'ohio-landmarks',
+  'new-york-landmarks',
+];
+
+/**
+ * Sightseeing tours, as opposed to sensor tours. Their whole subject is the
+ * photorealistic mesh, so an extra live layer costs frames for nothing — the
+ * budget here is deliberately tighter than the shared one below.
+ */
+const LANDMARK_TOUR_IDS = [
+  'london-landmarks', 'california-landmarks', 'ohio-landmarks',
+  'new-york-landmarks',
 ];
 
 /** Every layer id main.js registers. A tour may only name one of these. */
@@ -88,5 +100,51 @@ test('the fire tour points at the Pacific Northwest', () => {
   for (const shot of shots) {
     assert.ok(shot.lat > 43 && shot.lat < 51, `fire shot at lat ${shot.lat} left the region`);
     assert.ok(shot.lon > -125 && shot.lon < -113, `fire shot at lon ${shot.lon} left the region`);
+  }
+});
+
+test('landmark tours keep at most one live layer on', () => {
+  // These are shown to people as scenery. Manhattan and central London are the
+  // two most expensive meshes in the app, so a second live layer here is the
+  // difference between a smooth fly-through and a stuttering one.
+  for (const id of LANDMARK_TOUR_IDS) {
+    const on = Object.values(getSceneRecipeById(id).layers).filter(Boolean).length;
+    assert.equal(on, 1, `${id} enables ${on} layers — landmark tours get exactly one`);
+  }
+});
+
+test('landmark tours stay over the region they are named for', () => {
+  // Same guard as the fire tour: the region is the claim the title makes, and
+  // a coordinate typo would otherwise just fly the camera somewhere blank.
+  const REGIONS = {
+    'london-landmarks': { lat: [51.3, 51.7], lon: [-0.6, 0.3] },
+    'london-river-watch': { lat: [51.3, 51.7], lon: [-0.6, 0.3] },
+    'california-landmarks': { lat: [32.4, 42.1], lon: [-124.5, -114.0] },
+    'ohio-landmarks': { lat: [38.3, 42.4], lon: [-85.0, -80.4] },
+    'new-york-landmarks': { lat: [40.4, 41.0], lon: [-74.3, -73.6] },
+  };
+  for (const [id, box] of Object.entries(REGIONS)) {
+    for (const [i, shot] of getSceneRecipeById(id).cameraPath.entries()) {
+      assert.ok(
+        shot.lat >= box.lat[0] && shot.lat <= box.lat[1],
+        `${id} shot ${i}: lat ${shot.lat} left the region`,
+      );
+      assert.ok(
+        shot.lon >= box.lon[0] && shot.lon <= box.lon[1],
+        `${id} shot ${i}: lon ${shot.lon} left the region`,
+      );
+    }
+  }
+});
+
+test('only the London tours claim live video', () => {
+  // TfL is the one camera network in the app that publishes .mp4 beside the
+  // still (vite.config.js sets feedType from props.videoUrl). Austin and
+  // Caltrans are hardcoded feedType 'image'. If a non-London tour ever starts
+  // promising clips, this is where that gets caught.
+  const cctvTours = TOUR_IDS.filter((id) => getSceneRecipeById(id).layers.cctv);
+  const videoClaimants = cctvTours.filter((id) => /video|clip|live feed/i.test(getSceneRecipeById(id).title));
+  for (const id of videoClaimants) {
+    assert.ok(id.startsWith('london'), `${id} claims video but is not on the TfL network`);
   }
 });

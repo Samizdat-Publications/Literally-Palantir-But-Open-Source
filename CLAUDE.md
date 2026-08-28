@@ -107,6 +107,36 @@ they are routing hints for the model, not user-visible identity, and rebranding
 them would have broken the freeze for no functional gain. The agent's identity
 string (the system prompt) sits outside the block and *is* rebranded.
 
+**Layer weight is the performance story, not the mesh.** Three layers are
+static reference geometry totalling ~7,700 entities that never update:
+`local-datacenters` (4,351), `telegeography-submarine-cables` (712 polylines +
+1,917 landing points), `local-dams` (704). They are the usual cause of a heavy
+session and show nothing below regional altitude. `cctv` (image decode every
+10 s) and `satellites` in `dense` mode (SGP4 per frame) are the two live layers
+that genuinely cost. Everything else is close to free. Measured table:
+`docs/LAYER-COST.md`.
+
+**Voice can shed layers without touching the frozen schema.** The rule lives in
+the `instructions` array in `vite.config.js` (`SHEDDING LAYERS FOR SPEED`),
+built entirely out of `set_layer_visibility` calls that already exist — same
+bargain the `NAMED VIEWS` string a few lines above makes, and its own comment
+says so. Deleting the string is the whole rollback. `src/layerShedding.test.mjs`
+fails if it migrates into `GEV_REALTIME_TOOLS` or loses its do-nothing default.
+Adding a voice capability? Try an instruction string first; a tool schema edit
+busts the Realtime session cache.
+
+**The share link is already a complete view serialiser.** `_buildHashParams()`
+(`src/sharelink.js:474`) encodes camera, style, post-process, HUD, detection,
+basemap, all layers with options, and panel state — its docstring calls it a
+deterministic snapshot. Saved places builds on it; do not write a second
+encoder. The catch is that restore is boot-scoped (`_initialRestorePending`,
+`claimRestoreLane`) and must be made re-entrant. Spec:
+`docs/SAVED-PLACES-SPEC.md`.
+
+**Only London CCTV serves video.** TfL publishes a rolling `.mp4` beside every
+still. Austin and Caltrans are hardcoded `feedType: 'image'` in
+`vite.config.js`. Any tour or demo promising moving pictures has to be London.
+
 **Endpoints for unset keys return 503 by design.** `/api/firms`,
 `/api/ais-live`, `/api/realtime/token` all do this. It is the proxy declining to
 call upstream, not a fault.

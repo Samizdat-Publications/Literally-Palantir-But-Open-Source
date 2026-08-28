@@ -482,6 +482,222 @@ export const SCENE_RECIPES = [
       { lat: 34.0700, lon: -118.2350, alt: 1600, heading: 200, pitch: -22, roll: 0, duration: 6, hold: 2 },
     ],
   },
+  {
+    id: 'london-river-watch',
+    title: 'London River Watch — Thames Crossings',
+    durationSec: 45,
+    style: 'surveillance',
+    // Second London camera tour, deliberately disjoint from `london-eyes`:
+    // that one works the West End, this one runs the river east. TfL is the
+    // only network in the app that serves motion video, so both London tours
+    // are the ones where clicking a camera gives a moving picture.
+    layers: {
+      cctv: true,
+      traffic: true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 44, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      // Establishing shot looking back up the river from the east.
+      { lat: 51.500, lon: -0.055, alt: 20000, heading: 265, pitch: -50, roll: 0, duration: 5, hold: 1 },
+      // Vauxhall Cross — the SIS building sits right on the camera cluster.
+      { lat: 51.4875, lon: -0.1247, alt: 700, heading: 40, pitch: -20, roll: 0, duration: 5, hold: 2 },
+      // Blackfriars and the Embankment, looking downstream.
+      { lat: 51.5095, lon: -0.1030, alt: 900, heading: 95, pitch: -22, roll: 0, duration: 5, hold: 2 },
+      // Tower Bridge from downstream — the frame everyone recognises.
+      { lat: 51.5033, lon: -0.0740, alt: 750, heading: 285, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      // Canary Wharf. Dense towers, dense JamCams on the approach roads.
+      { lat: 51.5054, lon: -0.0235, alt: 1100, heading: 200, pitch: -24, roll: 0, duration: 5, hold: 2 },
+      // Blackwall Tunnel approach and the O2 — the busiest crossing east.
+      { lat: 51.5030, lon: 0.0032, alt: 1400, heading: 340, pitch: -28, roll: 0, duration: 5, hold: 1 },
+      { lat: 51.4830, lon: -0.0050, alt: 12000, heading: 300, pitch: -45, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'london-landmarks',
+    title: 'London Landmarks — The Skyline in 3D',
+    durationSec: 48,
+    style: 'noir',
+    // A sightseeing tour, not a sensor tour: the subject is Google's
+    // photorealistic mesh, so everything that costs frames stays off. CCTV is
+    // the one layer left on because the JamCams sit on these same streets and
+    // give the shot something live to click.
+    layers: {
+      cctv: true,
+      traffic: false,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 40, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      { lat: 51.5050, lon: -0.1100, alt: 16000, heading: 30, pitch: -48, roll: 0, duration: 5, hold: 1 },
+      // Palace of Westminster and the Elizabeth Tower.
+      { lat: 51.5007, lon: -0.1246, alt: 550, heading: 340, pitch: -16, roll: 0, duration: 4, hold: 2 },
+      // The London Eye, across the river from the last shot.
+      { lat: 51.5033, lon: -0.1196, alt: 500, heading: 250, pitch: -14, roll: 0, duration: 4, hold: 2 },
+      // Buckingham Palace, looking back down the Mall.
+      { lat: 51.5014, lon: -0.1419, alt: 700, heading: 95, pitch: -22, roll: 0, duration: 4, hold: 2 },
+      // St Paul's — the dome reads well from the south-west.
+      { lat: 51.5138, lon: -0.0984, alt: 600, heading: 200, pitch: -18, roll: 0, duration: 4, hold: 2 },
+      // The Shard, tallest thing in the mesh for miles.
+      { lat: 51.5045, lon: -0.0865, alt: 700, heading: 300, pitch: -12, roll: 0, duration: 4, hold: 2 },
+      // Tower Bridge and the Tower of London together.
+      { lat: 51.5081, lon: -0.0759, alt: 650, heading: 160, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      { lat: 51.5070, lon: -0.1000, alt: 14000, heading: 20, pitch: -46, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'california-landmarks',
+    title: 'California Landmarks — Golden Gate to the Hollywood Hills',
+    durationSec: 50,
+    style: 'retro',
+    // Earthquakes is the one layer on: the route runs the length of the San
+    // Andreas system, so the markers are actually about what is underneath
+    // the shot rather than decoration. Everything else is off for frames.
+    layers: {
+      earthquakes: true,
+      cctv: false,
+      traffic: false,
+      flights: false,
+      military: false,
+      satellites: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 46, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      { lat: 37.800, lon: -122.520, alt: 30000, heading: 90, pitch: -50, roll: 0, duration: 5, hold: 1 },
+      // Golden Gate Bridge from the Marin side, shooting back into the city.
+      { lat: 37.8199, lon: -122.4830, alt: 700, heading: 110, pitch: -14, roll: 0, duration: 5, hold: 2 },
+      // Transamerica Pyramid and the Financial District.
+      { lat: 37.7952, lon: -122.4028, alt: 800, heading: 220, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      // Down the coast. High enough that the thin rural mesh never shows.
+      { lat: 35.60, lon: -121.20, alt: 800000, heading: 150, pitch: -60, roll: 0, duration: 4, hold: 1 },
+      // Santa Monica Pier.
+      { lat: 34.0089, lon: -118.4973, alt: 600, heading: 60, pitch: -20, roll: 0, duration: 5, hold: 2 },
+      // The Hollywood Sign on Mount Lee.
+      { lat: 34.1341, lon: -118.3215, alt: 900, heading: 200, pitch: -16, roll: 0, duration: 5, hold: 2 },
+      // Griffith Observatory, with the basin behind it.
+      { lat: 34.1184, lon: -118.3004, alt: 700, heading: 240, pitch: -18, roll: 0, duration: 4, hold: 2 },
+      // Downtown LA to close.
+      { lat: 34.0522, lon: -118.2437, alt: 1200, heading: 300, pitch: -20, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'ohio-landmarks',
+    title: 'Ohio Landmarks — Canton, Cleveland, Columbus, Cincinnati',
+    durationSec: 52,
+    style: 'anime',
+    // Brighter palette than the other landmark tours on purpose — this is the
+    // hometown leg, not a sensor sweep.
+    //
+    // COVERAGE CAVEAT: Google's photorealistic mesh is city-shaped. Cleveland,
+    // Columbus and Cincinnati are dense; East Canton is a village and will
+    // render as coarse aerial mesh rather than modelled buildings, so that
+    // shot deliberately sits higher and wider than the downtown ones.
+    layers: {
+      traffic: true,
+      cctv: false,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 42, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      { lat: 40.30, lon: -82.80, alt: 400000, heading: 0, pitch: -60, roll: 0, duration: 5, hold: 1 },
+      // East Canton. Wide and high — see the coverage caveat above.
+      { lat: 40.7898, lon: -81.2843, alt: 2400, heading: 300, pitch: -34, roll: 0, duration: 5, hold: 2 },
+      // Pro Football Hall of Fame and Tom Benson Stadium, Canton.
+      { lat: 40.8206, lon: -81.4020, alt: 900, heading: 180, pitch: -24, roll: 0, duration: 5, hold: 2 },
+      // Cleveland lakefront — Rock & Roll Hall of Fame, Science Center, stadium.
+      { lat: 41.5086, lon: -81.6954, alt: 700, heading: 200, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      // Terminal Tower and downtown Cleveland.
+      { lat: 41.4977, lon: -81.6937, alt: 900, heading: 340, pitch: -16, roll: 0, duration: 5, hold: 2 },
+      // Ohio Statehouse and the Columbus core.
+      { lat: 39.9612, lon: -82.9988, alt: 800, heading: 40, pitch: -20, roll: 0, duration: 5, hold: 2 },
+      // Cincinnati riverfront — Roebling Suspension Bridge and the ballparks.
+      { lat: 39.0928, lon: -84.5100, alt: 700, heading: 20, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      { lat: 39.60, lon: -83.60, alt: 350000, heading: 20, pitch: -58, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
+  {
+    id: 'new-york-landmarks',
+    title: 'New York Landmarks — Liberty to Midtown',
+    durationSec: 52,
+    style: 'noir',
+    // AIS stays on because the harbour half of this route is genuinely busy —
+    // the Staten Island ferry and the Liberty boats cross the frame live
+    // behind the statue. Everything else off; Manhattan's mesh is expensive.
+    layers: {
+      'ais-live-vessels': true,
+      cctv: false,
+      traffic: false,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      radio: false,
+      bikeshare: false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 50, sharpen: true, detectionMode: 'SPARSE' },
+    cameraPath: [
+      { lat: 40.680, lon: -74.055, alt: 22000, heading: 30, pitch: -52, roll: 0, duration: 5, hold: 1 },
+      // Statue of Liberty, low and close.
+      { lat: 40.6892, lon: -74.0480, alt: 400, heading: 80, pitch: -12, roll: 0, duration: 5, hold: 2 },
+      // Ellis Island, with Lower Manhattan filling the background.
+      { lat: 40.6995, lon: -74.0420, alt: 900, heading: 55, pitch: -20, roll: 0, duration: 4, hold: 2 },
+      // One World Trade Center.
+      { lat: 40.7127, lon: -74.0160, alt: 900, heading: 60, pitch: -12, roll: 0, duration: 5, hold: 2 },
+      // Brooklyn Bridge across the East River.
+      { lat: 40.7061, lon: -73.9950, alt: 600, heading: 300, pitch: -18, roll: 0, duration: 5, hold: 2 },
+      // Empire State Building.
+      { lat: 40.7484, lon: -73.9880, alt: 900, heading: 80, pitch: -10, roll: 0, duration: 5, hold: 2 },
+      // Central Park's south edge, looking up the park.
+      { lat: 40.7660, lon: -73.9770, alt: 1400, heading: 350, pitch: -26, roll: 0, duration: 5, hold: 2 },
+      { lat: 40.7500, lon: -73.9800, alt: 18000, heading: 200, pitch: -50, roll: 0, duration: 5, hold: 0 },
+    ],
+  },
 ];
 
 export function getSceneRecipeById(id) {
