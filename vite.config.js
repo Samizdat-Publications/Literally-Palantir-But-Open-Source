@@ -1325,6 +1325,10 @@ const OPENAI_REALTIME_REASONING_DEFAULT = 'low';
 const OPENAI_REALTIME_CONTEXT_TOKENS_DEFAULT = 3000;
 const OPENAI_REALTIME_CONTEXT_RETENTION_DEFAULT = 0.5;
 const OPENAI_HUD_SUMMARY_MODEL_DEFAULT = 'gpt-5-nano';
+/** Gemini model for the HUD summary. Model ids drift — override in .env, not here. */
+const GEMINI_HUD_SUMMARY_MODEL_DEFAULT = 'gemini-3.1-pro-preview';
+/** Google AI Studio (Gemini API) base. NOT Vertex AI, which uses GCP service-account auth. */
+const GEMINI_API_BASE_DEFAULT = 'https://generativelanguage.googleapis.com/v1beta';
 const REALTIME_DEBUG_LOG_DIR = path.join(__dirname, '.gev-logs');
 const REALTIME_DEBUG_LOG_FILE = path.join(REALTIME_DEBUG_LOG_DIR, 'realtime-conversations.jsonl');
 const REALTIME_DEBUG_LOG_MAX_BYTES = 8 * 1024 * 1024;
@@ -4971,50 +4975,74 @@ function openAiRealtimeProxy() {
       // Opt-in per-IP throttle (GEV_RATELIMIT_OPENAI_PER_MIN). No-op when unset.
       if (!enforceOptInRateLimit(openAiRateLimiter(), req, res)) return;
 
-      const apiKey = process.env.OPENAI_API_KEY;
-      if (!apiKey) {
+      // The route keeps its /api/openai/ path because the browser client calls
+      // that literal string; the provider behind it is now selectable.
+      const provider = resolveHudSummaryProvider();
+      if (!provider) {
         res.statusCode = 503;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'OPENAI_API_KEY is not set' }));
+        res.end(JSON.stringify({ error: 'No HUD summary key set (GEMINI_API_KEY or OPENAI_API_KEY)' }));
         return;
       }
+      const providerLabel = provider === 'gemini' ? 'Gemini' : 'OpenAI';
 
       try {
         const body = await readRequestBody(req, 64 * 1024);
         const context = JSON.parse(body || '{}');
-        const response = await fetch('https://api.openai.com/v1/responses', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: process.env.OPENAI_HUD_SUMMARY_MODEL || OPENAI_HUD_SUMMARY_MODEL_DEFAULT,
-            instructions: [
-              `Write one concise intelligence-HUD summary for ${BRAND_NAME}.`,
-              'Use only the supplied place, street, nearby-place, and enabled-layer text labels.',
-              'Prefer the clearest named place and include a relevant enabled layer only when useful.',
-              'Do not infer from coordinates or invent a place.',
-              'Output exactly five words with no title, punctuation, markdown, or introductory phrase.',
-            ].join(' '),
-            input: JSON.stringify(context),
-            reasoning: { effort: 'minimal' },
-            max_output_tokens: 100,
-          }),
-        });
+        const instruction = hudSummaryInstruction();
+
+        let response;
+        let extract;
+        if (provider === 'gemini') {
+          const model = process.env.GEMINI_HUD_SUMMARY_MODEL || GEMINI_HUD_SUMMARY_MODEL_DEFAULT;
+          const base = process.env.GEMINI_API_BASE || GEMINI_API_BASE_DEFAULT;
+          // Key rides the x-goog-api-key header rather than a query string, so it
+          // cannot end up in a proxy or server access log.
+          response = await fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, {
+            method: 'POST',
+            headers: {
+              'x-goog-api-key': process.env.GEMINI_API_KEY,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: instruction }] },
+              contents: [{ role: 'user', parts: [{ text: JSON.stringify(context) }] }],
+              generationConfig: { maxOutputTokens: 100, temperature: 0 },
+            }),
+          });
+          extract = extractGeminiResponseText;
+        } else {
+          response = await fetch('https://api.openai.com/v1/responses', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: process.env.OPENAI_HUD_SUMMARY_MODEL || OPENAI_HUD_SUMMARY_MODEL_DEFAULT,
+              instructions: instruction,
+              input: JSON.stringify(context),
+              reasoning: { effort: 'minimal' },
+              max_output_tokens: 100,
+            }),
+          });
+          extract = extractOpenAiResponseText;
+        }
+
         const data = await response.json().catch(() => ({}));
-        const summary = toFiveWordHudSummary(extractOpenAiResponseText(data));
+        const summary = toFiveWordHudSummary(extract(data));
         res.statusCode = response.ok && summary ? 200 : response.status || 502;
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');
         res.end(JSON.stringify({
           summary: summary || null,
-          error: response.ok ? null : data.error?.message || 'OpenAI HUD summary request failed',
+          provider,
+          error: response.ok ? null : data.error?.message || `${providerLabel} HUD summary request failed`,
         }));
       } catch (error) {
         res.statusCode = 502;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: error?.message || 'OpenAI HUD summary request failed' }));
+        res.end(JSON.stringify({ error: error?.message || `${providerLabel} HUD summary request failed` }));
       }
     });
 
@@ -5223,6 +5251,57 @@ function openAiRealtimeProxy() {
       install(server.middlewares);
     },
   };
+}
+
+/**
+ * Which provider answers the HUD summary.
+ *
+ * Explicit HUD_SUMMARY_PROVIDER wins. Otherwise Gemini is preferred when its
+ * key is present, because it is the cheaper of the two for a five-word call —
+ * falling back to OpenAI keeps the feature working for an install that only
+ * ever configured OPENAI_API_KEY.
+ *
+ * @param {NodeJS.ProcessEnv} [env] - Injected for testing.
+ * @returns {'gemini'|'openai'|null} null when neither key is configured.
+ */
+export function resolveHudSummaryProvider(env = process.env) {
+  const explicit = String(env.HUD_SUMMARY_PROVIDER || '').trim().toLowerCase();
+  if (explicit === 'gemini') return env.GEMINI_API_KEY ? 'gemini' : null;
+  if (explicit === 'openai') return env.OPENAI_API_KEY ? 'openai' : null;
+  if (env.GEMINI_API_KEY) return 'gemini';
+  if (env.OPENAI_API_KEY) return 'openai';
+  return null;
+}
+
+/**
+ * The HUD summary prompt. Shared verbatim by both providers so a provider swap
+ * cannot silently change the wording the model is held to.
+ * @returns {string}
+ */
+export function hudSummaryInstruction() {
+  return [
+    `Write one concise intelligence-HUD summary for ${BRAND_NAME}.`,
+    'Use only the supplied place, street, nearby-place, and enabled-layer text labels.',
+    'Prefer the clearest named place and include a relevant enabled layer only when useful.',
+    'Do not infer from coordinates or invent a place.',
+    'Output exactly five words with no title, punctuation, markdown, or introductory phrase.',
+  ].join(' ');
+}
+
+/**
+ * Pull the text out of a Gemini generateContent response.
+ *
+ * Mirrors extractOpenAiResponseText: tolerate a shape that does not match and
+ * return '' rather than throwing, so the caller's 502 path reports a missing
+ * summary instead of a crash.
+ *
+ * @param {object} data - Parsed generateContent response.
+ * @returns {string}
+ */
+export function extractGeminiResponseText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts.map((part) => (typeof part?.text === 'string' ? part.text : '')).join(' ').trim();
 }
 
 function extractOpenAiResponseText(data) {
