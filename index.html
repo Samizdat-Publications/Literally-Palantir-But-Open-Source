@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>God's Eye View</title>
+  <title>KEYHOLE</title>
   <link rel="icon" type="image/svg+xml" href="/logo.svg" />
   <link rel="stylesheet" href="/style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -25,7 +25,7 @@
   <!-- Title -->
   <div id="title-bar">
     <div class="title-glow"></div>
-    <h1><span class="title-logo brand-logo" data-logo-gaze data-logo-src="/logo.svg" aria-hidden="true"><img src="/logo.svg" alt="" /></span> <span>GOD'S EYE <span class="title-accent">VIEW</span></span></h1>
+    <h1><span class="title-logo brand-logo" data-logo-gaze data-logo-src="/logo.svg" aria-hidden="true"><img src="/logo.svg" alt="" /></span> <span>KEY<span class="title-accent">HOLE</span></span></h1>
     <p class="subtitle">NO PLACE LEFT BEHIND</p>
   </div>
 
@@ -355,9 +355,10 @@
 
   <!-- Post-processing toggles (top-right) -->
   <div id="pp-toggles" class="panel-collapsible collapsed" data-panel-id="pp-toggles">
-    <div class="compact pp-header-row">
+    <div class="compact pp-header-row panel-drag-handle" title="Drag to move this panel">
       <span class="pp-header-label">DISPLAY</span>
       <span class="panel-divider" aria-hidden="true"></span>
+      <button id="panel-layout-reset" class="panel-collapse-btn" type="button" title="Reset all panel positions">&#x21BA;</button>
       <button class="panel-collapse-btn pp-collapse-btn" data-collapse-target="pp-toggles" title="Collapse panel">&#x25C0;</button>
     </div>
     <div class="pp-toggle-group">
@@ -404,7 +405,7 @@
     </div>
     <!-- The one shared preset-parameter surface is inserted here at runtime. -->
     <div id="param-slider-panel">
-      <div class="param-panel-header">
+      <div class="param-panel-header panel-drag-handle" title="Drag to move this panel">
         <span class="param-panel-title">PARAMETERS</span>
         <span class="param-panel-divider"></span>
         <button class="panel-collapse-btn" id="param-panel-collapse-btn" data-collapse-target="param-slider-panel" title="Collapse panel">−</button>
@@ -578,7 +579,7 @@
   <div id="data-panel" class="panel-collapsible collapsed active" data-panel-id="data-panel">
     <div class="panel-glow"></div>
     <div class="data-panel-inner">
-      <div class="panel-header">
+      <div class="panel-header panel-drag-handle" title="Drag to move this panel">
         <span class="panel-title">DATA LAYERS</span>
         <span class="panel-divider"></span>
         <button class="panel-collapse-btn" data-collapse-target="data-panel" title="Collapse panel">+</button>
@@ -591,7 +592,7 @@
   <div id="cctv-panel" class="panel-collapsible collapsed" data-panel-id="cctv-panel">
     <div class="panel-glow"></div>
     <div class="cctv-panel-inner">
-      <div class="panel-header">
+      <div class="panel-header panel-drag-handle" title="Drag to move this panel">
         <span class="panel-title">CCTV</span>
         <span class="panel-divider"></span>
         <button class="panel-collapse-btn" data-collapse-target="cctv-panel" title="Collapse panel">+</button>
@@ -647,7 +648,7 @@
   <div id="scene-panel" class="panel-collapsible collapsed" data-panel-id="scene-panel">
     <div class="panel-glow"></div>
     <div class="scene-panel-inner">
-      <div class="panel-header">
+      <div class="panel-header panel-drag-handle" title="Drag to move this panel">
         <span class="panel-title">SCENES</span>
         <span class="panel-divider"></span>
         <button class="panel-collapse-btn" data-collapse-target="scene-panel" title="Collapse panel">+</button>
@@ -687,7 +688,7 @@
     <div id="global-context-panel" class="panel-collapsible collapsed" data-panel-id="global-context-panel">
       <div class="panel-glow"></div>
       <div class="global-context-panel-inner">
-        <div class="panel-header">
+        <div class="panel-header panel-drag-handle" title="Drag to move this panel">
           <span class="panel-title">CONTEXT</span>
           <span class="panel-divider"></span>
           <div id="context-radio-dock" class="context-radio-dock">
@@ -770,7 +771,7 @@
         </section>
         <section id="radio-panel" class="panel-collapsible collapsed" data-panel-id="radio-panel" aria-label="Internet radio companion">
           <div class="radio-panel-inner">
-            <div class="panel-header">
+            <div class="panel-header panel-drag-handle" title="Drag to move this panel">
               <span class="panel-title">RADIO</span>
               <span id="radio-layer-state" class="radio-layer-state">OFF</span>
               <span class="panel-divider"></span>
@@ -889,7 +890,7 @@
   <div id="loading-screen">
     <div class="loader-content">
       <span class="loader-logo brand-logo" data-logo-gaze data-logo-src="/logo.svg" aria-hidden="true"><img src="/logo.svg" alt="" /></span>
-      <h2>GOD'S EYE <span class="title-accent">VIEW</span></h2>
+      <h2>KEY<span class="title-accent">HOLE</span></h2>
       <p class="loader-status">Initializing photorealistic world...</p>
     </div>
   </div>

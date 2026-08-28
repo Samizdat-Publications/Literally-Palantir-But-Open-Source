@@ -276,7 +276,9 @@ test('expanded right panels highlight the title divider without changing collaps
 
   assert.match(
     html,
-    /class="compact pp-header-row"[\s\S]*?class="pp-header-label">DISPLAY<\/span>[\s\S]*?class="panel-divider"/,
+    // Class list is open-ended: the row also carries .panel-drag-handle so it
+    // can act as the panel's grab target. The ordering below is the assertion.
+    /class="compact pp-header-row[^"]*"[\s\S]*?class="pp-header-label">DISPLAY<\/span>[\s\S]*?class="panel-divider"/,
   );
   assert.match(
     css,

@@ -212,6 +212,23 @@ const SHARE_PANEL_STATE_SPECS = Object.freeze([
   { id: 'pp-toggles' },
   { id: 'param-slider-panel' },
 ]);
+/**
+ * Panels wired for drag-to-reposition. Each must carry a `.panel-drag-handle`
+ * element in its markup (its header row) for `_initPanelDrag` to bind to.
+ *
+ * control-panel and location-bar are deliberately excluded — control-panel's
+ * header is a <button>, which the drag handler's interactive-element guard
+ * rejects, and location-bar is dock-anchored with no header row.
+ */
+const DRAGGABLE_PANEL_IDS = Object.freeze([
+  'pp-toggles',
+  'data-panel',
+  'cctv-panel',
+  'radio-panel',
+  'scene-panel',
+  'global-context-panel',
+  'param-slider-panel',
+]);
 /** Standard map-view panels cleared out of the way on a fresh Cockpit entry. */
 const COCKPIT_ENTRY_COLLAPSE_PANEL_IDS = Object.freeze([
   'data-panel',
@@ -489,7 +506,7 @@ const SHARPEN_SHADER = /* glsl */ `
 `;
 
 /**
- * Central UI orchestrator for the God's Eye View application.
+ * Central UI orchestrator for the KEYHOLE application.
  *
  * Responsibilities:
  * - CesiumJS PostProcessStage pipeline: registers per-style GLSL stages
@@ -2213,6 +2230,8 @@ export class StyleManager {
     this._awarenessClearedHandler = null;
     this._disposed = false;
     this._draggableResizeObserver = null;
+    /** @type {Array<{id:string, el:HTMLElement}>} populated by _initPanelDrag. */
+    this._draggablePanels = [];
 
     // DOM refs
     this._styleIndicator = document.getElementById('active-style-name');
@@ -2929,12 +2948,50 @@ export class StyleManager {
    * @returns {void}
    */
   _reclampDraggablePanels() {
-    const el = this._ppToggles;
-    if (!el || !el.style.top || el.style.top === 'auto') return;
-    const top = parseInt(el.style.top, 10);
-    if (!Number.isFinite(top)) return;
-    el.style.top = `${this._clampToViewport(0, top, el).top}px`;
-    this._pinPanelToRight(el);
+    for (const { id, el } of this._draggablePanels || []) {
+      if (!el || !el.style.top || el.style.top === 'auto') continue;
+      const top = parseInt(el.style.top, 10);
+      const left = parseInt(el.style.left, 10);
+      if (!Number.isFinite(top)) continue;
+      // pp-toggles is right-pinned, so only its vertical position is clamped
+      // here; _pinPanelToRight re-derives its left edge from the viewport.
+      if (id === 'pp-toggles') {
+        el.style.top = `${this._clampToViewport(0, top, el).top}px`;
+        this._pinPanelToRight(el);
+        continue;
+      }
+      if (!Number.isFinite(left)) continue;
+      const clamped = this._clampToViewport(left, top, el);
+      el.style.left = `${clamped.left}px`;
+      el.style.top = `${clamped.top}px`;
+    }
+  }
+
+  /**
+   * Clears every saved panel position and returns all draggable panels to their
+   * stylesheet-defined origin. Free-floating panels are easy to lose — behind a
+   * sibling, or off a viewport that has since shrunk — so the escape hatch is
+   * part of the feature, not a nicety.
+   * @returns {void}
+   */
+  resetPanelLayout() {
+    for (const id of DRAGGABLE_PANEL_IDS) {
+      try {
+        localStorage.removeItem(this._panelStorageKey(id));
+      } catch {
+        // storage unavailable — clearing inline styles below still resets the view
+      }
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.style.left = '';
+      el.style.top = '';
+      el.style.right = '';
+      el.style.bottom = '';
+      el.style.zIndex = '';
+    }
+    this._panelZCounter = PANEL_Z_BASE;
+    this._layoutRightPanels?.();
+    this._syncCctvPanelViewport?.();
   }
 
   /**
@@ -4242,25 +4299,38 @@ export class StyleManager {
    * @returns {void}
    */
   _initPanelDrag() {
-    const dragSpecs = [
-      {
-        id: 'pp-toggles',
-        panel: this._ppToggles,
-        handle: this._ppToggles?.querySelector('.panel-drag-handle.compact'),
-      },
-    ].filter(Boolean);
+    // Every panel whose header is a plain element usable as a grab target.
+    // control-panel and location-bar are deliberately absent: control-panel's
+    // header IS a <button>, which _makePanelDraggable's interactive-element
+    // guard rejects by design, and location-bar is dock-anchored with no
+    // header row. Both stay put so the dock keeps a deterministic layout.
+    const dragSpecs = DRAGGABLE_PANEL_IDS.map((id) => {
+      const panel = document.getElementById(id);
+      return { id, panel, handle: panel?.querySelector('.panel-drag-handle') };
+    });
 
+    this._draggablePanels = [];
+    const resetBtn = document.getElementById('panel-layout-reset');
+    if (resetBtn && !resetBtn.dataset.wired) {
+      resetBtn.dataset.wired = '1';
+      resetBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.resetPanelLayout();
+      });
+    }
     for (const spec of dragSpecs) {
       if (!spec.panel || !spec.handle) continue;
       this._restorePanelPosition(spec.id, spec.panel);
       this._makePanelDraggable(spec.id, spec.panel, spec.handle);
+      spec.panel.classList.add('panel-draggable');
+      this._draggablePanels.push({ id: spec.id, el: spec.panel });
     }
     // Keep a positioned panel on-screen when its HEIGHT changes after restore — it expands to its
     // full row set a frame or two later, so the restore-time clamp used a stale (shorter) height and
     // the panel could still hang off the bottom (audit U2). Re-clamp on every size change.
-    if (this._ppToggles && typeof ResizeObserver !== 'undefined') {
+    if (this._draggablePanels.length && typeof ResizeObserver !== 'undefined') {
       this._draggableResizeObserver = new ResizeObserver(() => this._reclampDraggablePanels());
-      this._draggableResizeObserver.observe(this._ppToggles);
+      for (const { el } of this._draggablePanels) this._draggableResizeObserver.observe(el);
     }
   }
 
