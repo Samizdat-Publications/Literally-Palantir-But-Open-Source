@@ -131,6 +131,39 @@ docs/CURRENT-STATE.md   # Authoritative runtime reference (~270KB)
 
 Tests are colocated as `*.test.mjs` beside the module they cover.
 
+## Scene tours
+
+`src/scenes/recipes.js` holds the cinematic tours. Seven demo tours were added
+on top of upstream's four.
+
+**A shot only touches the layers it NAMES.** `sceneLayerPlan` leaves undeclared
+layers exactly as it found them, so a tour that omits a layer inherits whatever
+the previous tour left on — which on a loaded globe is a frame-rate problem.
+Every demo tour therefore declares all 14 registered layers explicitly, most of
+them `false`. `src/demoTours.test.mjs` enforces that.
+
+`sceneLayerPlan` also **drops unregistered layer ids silently**, so a typo in a
+recipe is invisible at runtime — the layer simply never gets set. The test
+guards against that too. The registered ids are:
+
+```
+flights  military  earthquakes  satellites  rocket-launches  traffic
+cctv  radio  bikeshare  ais-live-vessels  military-installations
+local-firms  local-dams  local-datacenters
+```
+
+Styles: `retro` `surveillance` `thermal` `anime` `noir` `snow`.
+
+## CCTV feeds: London has video, the others do not
+
+TfL publishes a rolling `.mp4` beside every JamCam still — all 890 of them, on
+the same S3 bucket. Upstream shipped stills-only with `props.videoUrl
+deliberately unused`; this fork enables the video, pinned to the same
+official-bucket origin as the still, opt-out via `CCTV_TFL_VIDEO=0`.
+
+Austin and Caltrans publish stills only. There is no video to unlock there, so
+any "show me live video" request means London.
+
 ## Conventions
 
 - Match surrounding style. The codebase uses thorough JSDoc headers explaining

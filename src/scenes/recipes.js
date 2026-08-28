@@ -390,6 +390,56 @@ export const SCENE_RECIPES = [
       { lat: 34.5, lon: -87.0, alt: 2400000, heading: 20, pitch: -66, roll: 0, duration: 5, hold: 0 },
     ],
   },
+
+  {
+    id: 'world-service',
+    title: 'World Service — Spin the Dial',
+    durationSec: 42,
+    style: 'noir',
+    ui: { hidePanels: false, hudMode: 'full', safeFrame: '16:9' },
+    // Radio and nothing else. The point of this one is audio, so every other
+    // layer is off — both for frame rate and so the globe stays legible while
+    // the tuner is doing the talking.
+    layers: {
+      radio: true,
+      flights: false,
+      military: false,
+      satellites: false,
+      earthquakes: false,
+      traffic: false,
+      cctv: false,
+      bikeshare: false,
+      'ais-live-vessels': false,
+      'rocket-launches': false,
+      'military-installations': false,
+      'local-firms': false,
+      'local-dams': false,
+      'local-datacenters': false,
+    },
+    post: { bloom: 48, sharpen: true, detectionMode: 'OFF' },
+    // Five broadcasters that sound nothing like each other, chosen where the
+    // photorealistic tiles are also strong — the tour has to be worth watching
+    // while you listen. Roughly west-to-east so the daylight terminator moves
+    // consistently across the run.
+    cameraPath: [
+      // New Orleans, French Quarter. Jazz and blues where they were invented,
+      // and a street grid that reads instantly from the air.
+      { lat: 29.9580, lon: -90.0650, alt: 2200, heading: 35, pitch: -30, roll: 0, duration: 6, hold: 2 },
+      // Mexico City, Centro Histórico. One of the densest radio markets on
+      // earth, over the Zócalo.
+      { lat: 19.4326, lon: -99.1332, alt: 3400, heading: 10, pitch: -34, roll: 0, duration: 6, hold: 2 },
+      // Rio de Janeiro. Samba, and the most dramatic terrain of the five —
+      // framed from over the bay toward Sugarloaf and Copacabana.
+      { lat: -22.9490, lon: -43.1560, alt: 4200, heading: 250, pitch: -26, roll: 0, duration: 6, hold: 2 },
+      // Istanbul, over the Bosphorus. Europe on one bank, Asia on the other,
+      // and a broadcast mix that sounds like neither of the stops before it.
+      { lat: 41.0220, lon: 29.0080, alt: 5200, heading: 200, pitch: -30, roll: 0, duration: 6, hold: 2 },
+      // Tokyo, Shibuya. City pop, and the densest 3D in the app.
+      { lat: 35.6595, lon: 139.7005, alt: 1400, heading: 20, pitch: -24, roll: 0, duration: 6, hold: 2 },
+      // Pull out over the Pacific to close on the whole dial at once.
+      { lat: 20.0, lon: 170.0, alt: 16000000, heading: 0, pitch: -76, roll: 0, duration: 6, hold: 0 },
+    ],
+  },
 ];
 
 export function getSceneRecipeById(id) {

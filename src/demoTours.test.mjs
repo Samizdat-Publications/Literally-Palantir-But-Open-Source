@@ -10,6 +10,7 @@ import { SCENE_RECIPES, getSceneRecipeById } from './scenes/recipes.js';
 const TOUR_IDS = [
   'fireline-cascadia', 'orbital-ascent', 'london-eyes',
   'harbor-watch', 'approach-and-intercept', 'airborne-all-the-way',
+  'world-service',
 ];
 
 /** Every layer id main.js registers. A tour may only name one of these. */

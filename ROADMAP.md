@@ -167,3 +167,35 @@ Making the other ~13 panels draggable is therefore an extension of a tested
 system, not new machinery: add handles, register them in `dragSpecs`, and switch
 rail-anchored panels to free positioning on first drag. A "reset layout" control
 should land in the same change, because free-floating panels do get lost.
+
+
+---
+
+# Open items
+
+Carried forward. Nothing here is blocked on anything but a decision.
+
+| # | Item | Notes |
+|---|---|---|
+| 1 | **Weather radar layer** | Wanted, not built. Needs a tile proxy, a layer module, attribution in **both** `DATA_SOURCES.md` and `dataCredits.js`, and a UI toggle. RainViewer is the obvious source — free, keyless, global, ~10-minute animation loop. Pairs naturally with the fire tour. |
+| 2 | **Docs brand pass** | 13 `.md` files still say "God's Eye View". Some **must** keep it — `FORK-NOTES.md`, `DATA_SOURCES.md`, `public/models/README.md`, and the media-attribution line in `README.md` are provenance. The rest are stale product references (e.g. `docs/opensky-auth.md`). |
+| 3 | **Verify the Gemini model id** | `gemini-3.1-pro-preview` is unconfirmed — Google validates auth before the model, so an invalid key cannot test it. First real HUD summary will say. `GEMINI_HUD_SUMMARY_MODEL` overrides without a code change. |
+| 4 | **Node 24.14+ on the operator's machine** | Currently 24.13.1, below the `engines` floor. Runs, warns `EBADENGINE`. |
+| 5 | **Rotate keys before going live** | Google Maps, OpenAI, Gemini, AISStream, FIRMS, TomTom, Cesium ion. Several were shared in chat during setup and are known-exposed. |
+| 6 | **Historical aircraft via OpenSky Trino** | `traffic` and `pyopensky` (both Python) query OpenSky's **historical** ADS-B database, not the live REST feed this app uses. That is a concrete route to the time dimension the correlation engine needs — "what was airborne over this spot at this time?" — and it is the single most useful lead found so far for that problem. |
+
+## Keys: what is actually needed
+
+Verified against the code, not the README.
+
+**Required:** `GOOGLE_MAPS_API_KEY` — with **four** APIs enabled (Map Tiles,
+Geocoding, Places (New), Street View Static).
+
+**Worth having:** `AISSTREAM_API_KEY`, `FIRMS_MAP_KEY`, `TOMTOM_API_KEY`,
+`CESIUM_ION_TOKEN` (a public `assets:read` token; unlocks Bing aerial and
+Cesium World Terrain, which matter wherever Google's photorealistic 3D coverage
+thins out — i.e. most of the world outside cities).
+
+**Skip:** `OPENSKY_CLIENT_ID`/`SECRET` (anonymous already returns live
+aircraft), `LL2_API_TOKEN` (free tier is 15 req/hr; the proxy's 15-minute cache
+means at most 4), `TFL_APP_KEY` (raises a list-endpoint rate limit only).
