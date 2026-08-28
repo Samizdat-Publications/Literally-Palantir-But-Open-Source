@@ -120,6 +120,38 @@ export class MapStackController {
       : `${stack?.label || 'This map stack'} is unavailable`;
   }
 
+  /**
+   * Turn a provider failure into something the operator can act on.
+   *
+   * Cesium surfaces an ion rejection as the bare string "Request has failed.
+   * Status Code: 401", which reads like a network fault and sends people off
+   * to check a Bing Maps key. THERE IS NO BING MAPS KEY. These stacks are
+   * Cesium ion World Imagery (`IonWorldImageryStyle`); the chips say "Bing"
+   * only because ion's imagery was historically Bing-sourced. A 401 means
+   * CESIUM_ION_TOKEN reached the browser and ion refused it — most often
+   * because it is a Bing or Google Maps key rather than an ion token, or was
+   * truncated on the way into `.env`. A 403 is a scope problem instead: the
+   * token is real but not allowed to read World Imagery.
+   *
+   * `_unavailableReason` covers the other case — no token configured at all —
+   * and never reaches here, because that check short-circuits before the
+   * provider is ever constructed.
+   *
+   * @param {unknown} error - Whatever the provider threw.
+   * @param {object} stack - Stack descriptor being activated.
+   * @returns {string} Message safe to show in a toast.
+   */
+  _activationErrorMessage(error, stack) {
+    const raw = error?.message || String(error);
+    if (stack?.requiresIon && /\b401\b/.test(raw)) {
+      return 'Cesium ion rejected CESIUM_ION_TOKEN (401). These stacks use Cesium ion World Imagery, not a Bing Maps key. Check the token at cesium.com/ion/tokens.';
+    }
+    if (stack?.requiresIon && /\b403\b/.test(raw)) {
+      return 'Cesium ion denied World Imagery (403). CESIUM_ION_TOKEN is valid but lacks assets:read, or is restricted to other assets.';
+    }
+    return raw;
+  }
+
   getStack(id) {
     return MAP_STACKS.find((stack) => stack.id === id) || null;
   }
@@ -186,7 +218,7 @@ export class MapStackController {
       if (!silent) this._emitChange('ready');
     } catch (error) {
       if (gen !== this._switchGen) return this.getState();
-      const message = error?.message || String(error);
+      const message = this._activationErrorMessage(error, stack);
       this._lastError = message;
       this._onError?.(message, stack);
       if (this.googleTileset) {

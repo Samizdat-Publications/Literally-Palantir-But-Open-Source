@@ -107,6 +107,43 @@ they are routing hints for the model, not user-visible identity, and rebranding
 them would have broken the freeze for no functional gain. The agent's identity
 string (the system prompt) sits outside the block and *is* rebranded.
 
+**Layer weight is the performance story, not the mesh.** Three layers are
+static reference geometry totalling ~7,700 entities that never update:
+`local-datacenters` (4,351), `telegeography-submarine-cables` (712 polylines +
+1,917 landing points), `local-dams` (704). They are the usual cause of a heavy
+session and show nothing below regional altitude. `cctv` (image decode every
+10 s) and `satellites` in `dense` mode (SGP4 per frame) are the two live layers
+that genuinely cost. Everything else is close to free. Measured table:
+`docs/LAYER-COST.md`.
+
+**Voice can shed layers without touching the frozen schema.** The rule lives in
+the `instructions` array in `vite.config.js` (`SHEDDING LAYERS FOR SPEED`),
+built entirely out of `set_layer_visibility` calls that already exist — same
+bargain the `NAMED VIEWS` string a few lines above makes, and its own comment
+says so. Deleting the string is the whole rollback. `src/layerShedding.test.mjs`
+fails if it migrates into `GEV_REALTIME_TOOLS` or loses its do-nothing default.
+Adding a voice capability? Try an instruction string first; a tool schema edit
+busts the Realtime session cache.
+
+**The share link is already a complete view serialiser.** `_buildHashParams()`
+(`src/sharelink.js:474`) encodes camera, style, post-process, HUD, detection,
+basemap, all layers with options, and panel state — its docstring calls it a
+deterministic snapshot. Saved places builds on it; do not write a second
+encoder. The catch is that restore is boot-scoped (`_initialRestorePending`,
+`claimRestoreLane`) and must be made re-entrant. Spec:
+`docs/SAVED-PLACES-SPEC.md`.
+
+**Only London CCTV serves video.** TfL publishes a rolling `.mp4` beside every
+still. Austin and Caltrans are hardcoded `feedType: 'image'` in
+`vite.config.js`. Any tour or demo promising moving pictures has to be London.
+
+**There is no Bing Maps key.** The `bing-aerial` / `bing-labels` chips are
+`Cesium.IonWorldImageryStyle` — **Cesium ion World Imagery**, authenticated with
+`CESIUM_ION_TOKEN`. They say "Bing" only because ion's imagery was historically
+Bing-sourced. A 401 on those chips is ion refusing the ion token, not a missing
+Bing key, and sending someone to the Bing Maps console wastes their afternoon.
+`_activationErrorMessage` in `src/mapStackController.js` translates it.
+
 **Endpoints for unset keys return 503 by design.** `/api/firms`,
 `/api/ais-live`, `/api/realtime/token` all do this. It is the proxy declining to
 call upstream, not a fault.
@@ -130,6 +167,46 @@ docs/CURRENT-STATE.md   # Authoritative runtime reference (~270KB)
 ```
 
 Tests are colocated as `*.test.mjs` beside the module they cover.
+
+## Scene tours
+
+`src/scenes/recipes.js` holds the cinematic tours. Seven demo tours were added
+on top of upstream's four.
+
+**A shot only touches the layers it NAMES.** `sceneLayerPlan` leaves undeclared
+layers exactly as it found them, so a tour that omits a layer inherits whatever
+the previous tour left on — which on a loaded globe is a frame-rate problem.
+Every demo tour therefore declares all 14 registered layers explicitly, most of
+them `false`. `src/demoTours.test.mjs` enforces that.
+
+`sceneLayerPlan` also **drops unregistered layer ids silently**, so a typo in a
+recipe is invisible at runtime — the layer simply never gets set. The test
+guards against that too. The registered ids are:
+
+```
+flights  military  earthquakes  satellites  rocket-launches  traffic
+cctv  radio  bikeshare  ais-live-vessels  military-installations
+local-firms  local-dams  local-datacenters
+```
+
+Styles: `retro` `surveillance` `thermal` `anime` `noir` `snow`.
+
+## CCTV feeds: London has video, the others do not
+
+TfL publishes a rolling `.mp4` beside every JamCam still — all 890 of them, on
+the same S3 bucket. Upstream shipped stills-only with `props.videoUrl
+deliberately unused`; this fork enables the video, pinned to the same
+official-bucket origin as the still, opt-out via `CCTV_TFL_VIDEO=0`.
+
+Austin and Caltrans publish stills only. There is no video to unlock there, so
+any "show me live video" request means London.
+
+## Where to pick up
+
+`ROADMAP.md` → **Open items** is the live queue. The next build is the weather
+radar layer: approved, spec'd, and every API shape in
+`docs/WEATHER-RADAR-SPEC.md` was verified against the live service rather than
+recalled — RainViewer is free and keyless, so there is nothing to obtain first.
 
 ## Conventions
 
