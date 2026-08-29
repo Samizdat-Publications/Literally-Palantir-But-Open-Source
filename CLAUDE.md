@@ -137,6 +137,19 @@ encoder. The catch is that restore is boot-scoped (`_initialRestorePending`,
 still. Austin and Caltrans are hardcoded `feedType: 'image'` in
 `vite.config.js`. Any tour or demo promising moving pictures has to be London.
 
+**`.env` only fills gaps — the shell wins.** `vite.config.js` merges dotenv
+with `if (process.env[key] === undefined) process.env[key] = val`, then builds
+`env` from `process.env`. So an exported shell variable or a Windows *User*
+environment variable **silently overrides `.env`**, and editing `.env` then
+changes nothing at all. When a key looks correct on disk but the app behaves as
+if it is stale, check `$env:KEY` and
+`[Environment]::GetEnvironmentVariable('KEY','User')` before anything else.
+
+Two more things make an edited key look ignored: `define` bakes
+`import.meta.env.*` at **transform time**, so the dev server must be restarted
+(`--force` to clear Vite's cache), and the browser may hold the old module —
+hard-refresh it.
+
 **LF line endings are load-bearing, not style.** Several tests read source as
 text and assert exact bytes — the SHA-256 over `GEV_REALTIME_TOOLS`, and
 regexes terminated by `\n  }\n`. A CRLF checkout grows that block by 622 bytes
