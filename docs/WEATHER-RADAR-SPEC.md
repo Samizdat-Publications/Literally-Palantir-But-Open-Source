@@ -1,5 +1,29 @@
 # Weather radar layer — build spec
 
+> ## ⚠️ Correction 2026-08-29 — read before building
+>
+> Two claims below were tested against the running app and did not survive.
+>
+> **1. The rendering approach in §2 does not work on the default basemap.**
+> "Render as a Cesium `ImageryLayer` over the globe" draws **nothing** in
+> photoreal mode: Google's 3D tileset replaces the globe
+> (`_activatePhotoreal()` sets `scene.globe.show = false`), and an
+> `ImageryLayer` has no surface to draw on. Measured: **0** radar tile requests
+> on `photoreal`, **61 × HTTP 200** on the `osm` globe stack. Making radar
+> visible in photoreal mode needs **geometry, not imagery**. This is probably
+> why upstream pulled its radar overlay for "unreliable visible value"
+> (`docs/KNOWN-ISSUES.md`). §1 (the proxy) is unaffected.
+>
+> **2. RainViewer never returns 404.** A bogus frame path returns **HTTP 200**
+> with a valid 1085-byte PNG, and out-of-range `z/x/y` also returns **200**. So
+> the "expired/404" error model does not exist, and a stale path renders a
+> plausible-but-wrong image instead of failing. Our proxy must therefore reject
+> bad coordinates itself, and the UI should surface the frame timestamp.
+> Relatedly, paths expire far more slowly than warned: a path captured
+> 2026-08-28 still resolved a day later.
+>
+> Evidence: [`VERIFIED-STATE.md`](VERIFIED-STATE.md).
+
 Requested and approved. Not built. Everything below was verified live against
 the real API on 2026-08-28, so the shapes and URLs are observed, not guessed.
 

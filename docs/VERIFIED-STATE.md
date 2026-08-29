@@ -180,6 +180,60 @@ The true list is 16.
 
 ---
 
+## The weather radar spec's rendering approach does not work
+
+Tested before building, by draping a real RainViewer frame on the live globe.
+This is the finding that changes the next build.
+
+**`docs/WEATHER-RADAR-SPEC.md` says:** *"Render as a Cesium `ImageryLayer` over
+the globe, alpha ~0.6 so terrain reads through."*
+
+**On the app's default basemap that renders nothing at all.** Measured:
+
+| Stack | `scene.globe.show` | tileset | radar tile requests |
+|---|---|---|---:|
+| `photoreal` (default) | **`false`** | shown | **0** |
+| `osm` (globe stack) | `true` | hidden | **61, all HTTP 200** |
+
+Google's photorealistic 3D tileset **replaces** the Cesium globe rather than
+sitting on it. `src/mapStackController.js` is explicit: `_activatePhotoreal()`
+sets `globe.show = false` and strips imagery layers, while
+`_activateGlobeStack()` sets `globe.show = true` and hides the tileset. The two
+are mutually exclusive.
+
+An `ImageryLayer` draws on the globe surface. With the globe off there is no
+surface, so Cesium never even *requested* a radar tile — the layer reported
+`show: true, alpha: 0.85` and drew nothing. Hiding the tileset by hand did not
+help either; `globe.show` stays false. It fails silently, exactly like the HUD
+bug above.
+
+On the `osm` stack it renders correctly and legibly (precipitation over
+Vancouver, Bellingham, Victoria and Puget Sound, with reflectivity cores clear).
+So radar works — but only with the photorealistic 3D globe switched **off**,
+which is the app's whole aesthetic.
+
+**This is very likely what `docs/KNOWN-ISSUES.md` meant** by holding weather
+radar out of OSS v1 after QA found the overlay *"did not provide reliable
+visible value."* An overlay that is invisible on the default basemap and appears
+only after you give up the 3D mesh is precisely unreliable visible value.
+
+Note `src/cockpitCloudEffects.js` is *not* a counter-example: it is a
+full-screen shader pass (screen-space clouds), not geospatially-placed
+geometry, which is why it survives photoreal mode.
+
+Implications for the build, none of which the spec anticipates:
+
+- Rendering as an `ImageryLayer` delivers a layer that is invisible in the mode
+  the app is built around. That is the shipped-and-pulled outcome.
+- Making it visible in photoreal mode requires **geometry, not imagery** — e.g.
+  translucent textured rectangles carrying the radar tile, placed at echo
+  altitude above the mesh. That is physically truthful (weather *is* above the
+  ground) and is a different, larger piece of work than the spec scopes.
+- Either way the spec's "What to build → 2. Layer module" section needs
+  rewriting before anyone starts.
+
+The proxy half of the spec (§1) is unaffected and still correct.
+
 ## Roadmap items this settles
 
 - **Open item #5 — "Verify the Gemini model id."** `gemini-3.1-pro-preview` **is**
