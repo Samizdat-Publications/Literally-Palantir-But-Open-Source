@@ -3,6 +3,11 @@
 Written 2026-08-28. Read `CLAUDE.md` first — it has the landmines. This file is
 state: what is done, what is next, and what will bite.
 
+> **Working locally?** Read
+> [`LOCAL-SESSION-BRIEF.md`](LOCAL-SESSION-BRIEF.md) first — it covers what a
+> local session can verify that no cloud session could, and the preflight to
+> run before touching anything.
+
 ## Where things stand
 
 Branch `claude/repo-setup-api-keys-b5jc6x`, open **draft** PR #5 against `main`.
@@ -45,9 +50,13 @@ It carries everything below.
    path is done; the UI path is not.
 4. Then the rest of `ROADMAP.md` → Open items.
 
-## Bing/ion 401 — open, diagnosed but not resolved
+## Bing/ion 401 — CLOSED, confirmed working
 
-The operator reports the Bing basemap chips failing with
+**Resolved 2026-08-29. The operator confirms every basemap renders.** Kept in
+full because the reasoning took four wrong turns and none of them should be
+walked again.
+
+The symptom was the Bing basemap chips failing with
 `REQUEST HAS FAILED. STATUS CODE: 401`, "despite having the API key".
 
 **The chip labels are misleading and that is the whole confusion.** There is no
@@ -65,15 +74,113 @@ is not what the operator saw.
 The toast now translates this instead of surfacing Cesium's raw string; see
 `_activationErrorMessage` and `src/mapStackIonError.test.mjs`.
 
-**Ranked causes.** Most likely first, and the first one fits the operator's own
-words exactly:
+**Measured on the operator's machine, 2026-08-28:** token length **293**,
+prefix **`eyJhbG`**, `/v1/me` → **401**, `/v1/assets/2/endpoint` →
+`{"code":"INVALID_TOKEN"}` **401**.
 
-1. A **Bing Maps or Google Maps key** was pasted into `CESIUM_ION_TOKEN`. Same
-   class of mistake as a Maps Platform key not working against Gemini.
-2. The token was **truncated** on the way into `.env` — ion tokens are long JWTs.
-3. The token lacks **`assets:read`**, or is restricted to an asset allowlist
-   that excludes World Imagery. Note this usually returns **403**, not 401.
-4. The token was revoked, or belongs to a deleted ion account.
+That rules out the two easy explanations. `eyJhbG` is a JWT header, so it is
+**not** a Google or Bing key (those are `AIza`-style opaque strings), and 293
+characters is full length for an ion token rather than a truncated paste. It is
+a well-formed token that ion does not recognise.
+
+**Remaining causes, most likely first:**
+
+1. The token was **revoked or deleted** in the ion account.
+2. It belongs to a **different or closed ion account** than the one now in use.
+3. It carries an `exp` that has **passed** — ion default tokens usually have
+   none, but a hand-made one can.
+4. A **trailing character** rode along in `.env` (a quote, a stray space).
+   Vite strips surrounding quotes when it loads `.env`, so this would break the
+   `curl` probe above while leaving the app working — but the app is failing
+   too, so this is unlikely on its own.
+
+**Decoded on the operator's machine, 2026-08-28: the value is not a JWT.**
+`$t.Split('.').Count` returned **1** — there are **no dots in it at all**,
+where a real token has exactly two. The last four characters rendered as
+`••••`, which is the PowerShell console drawing characters it cannot print.
+
+So the stored value is corrupt, not merely wrong: 293 characters that begin
+`eyJhbG` but carry no segment separators and end in unprintable bytes. Cesium
+ion could never have accepted it, and no amount of scope or account fixing
+would have helped. Something mangled it on the way into `.env` — a truncated
+or re-encoded paste, or a write that did not round-trip the value.
+
+**Resolved by rewriting the line.** A freshly minted token was verified
+against ion directly on 2026-08-28 — `/v1/me` returned **200**, and every
+asset the app touches returned **200**:
+
+| ion asset | Used by | Result |
+|---|---|---|
+| 1 — Cesium World Terrain | terrain on keyed globe stacks | `200` |
+| 2 — World Imagery | `bing-aerial` chip | `200` |
+| 3 — World Imagery with Labels | `bing-labels` chip | `200` |
+
+Asset 2's response is also the proof of the architecture note above: it carries
+`"externalType":"BING"` and ion's **own** Bing key in `options.key`. Ion brokers
+Bing on the account's behalf, which is exactly why no Bing Maps key exists in
+this app or ever needs to.
+
+The account is on ion's **free tier** — the asset response carries an "Upgrade
+for commercial use" attribution, which must stay visible.
+
+Write the token in a way that cannot mangle it (below) and **restart the dev
+server** — Vite bakes `import.meta.env` at build time, so editing `.env` under
+a running server changes nothing.
+
+To confirm what the corruption actually is, if it recurs:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
+"length: $($t.Length)  dots: $(([char[]]$t | Where-Object {$_ -eq '.'}).Count)"
+"unprintable: $(([char[]]$t | Where-Object {[int]$_ -lt 33 -or [int]$_ -gt 126}).Count)"
+([char[]]$t)[-8..-1] | ForEach-Object { "  '{0}' = U+{1:X4}" -f $_, [int]$_ }
+```
+
+A healthy ion token reports **2 dots and 0 unprintable characters**.
+
+**Writing a key into `.env` without mangling it.** `Read-Host` echoes input in
+PowerShell unless given `-AsSecureString`, and a plain `-replace` silently
+does nothing when the line is absent. This round-trips correctly:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$sec = Read-Host "Paste the Cesium ion token" -AsSecureString
+$val = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+$val = $val.Trim()
+"captured length: $($val.Length)  dots: $(([char[]]$val | Where-Object {$_ -eq '.'}).Count)"
+if ((Get-Content .env) -match '^CESIUM_ION_TOKEN=') {
+  (Get-Content .env) -replace '^CESIUM_ION_TOKEN=.*', "CESIUM_ION_TOKEN=$val" |
+    Set-Content .env -Encoding UTF8
+} else {
+  Add-Content .env "CESIUM_ION_TOKEN=$val" -Encoding UTF8
+}
+```
+
+Check the echoed `dots: 2` before moving on. That one line is the whole
+verification — if it says 0, the paste was mangled again and nothing
+downstream will work.
+
+**Superseded reasoning, kept so it is not re-derived.** A JWT payload is base64url, not
+encrypted, and this reveals scopes, expiry and issuer without sending the token
+anywhere:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
+"segments: $($t.Split('.').Count)   last4: $($t.Substring($t.Length-4))"
+$p = $t.Split('.')[1].Replace('-','+').Replace('_','/')
+while ($p.Length % 4) { $p += '=' }
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p))
+```
+
+A genuine ion token decodes to `"iss":"ad"` with a `scopes` array. If `iss` is
+anything else it is not an ion token at all. If `exp` is in the past it is
+expired. Either way the fix is the same and takes two minutes: mint a fresh
+token at cesium.com/ion/tokens with `assets:read`, put it in `.env`, and
+**restart the dev server** — Vite bakes `import.meta.env` at build time, so
+editing `.env` under a running server changes nothing.
 
 **Diagnostic — run this on the operator's machine.** Both endpoints were
 verified live on 2026-08-28: a bogus token returns `401` from `/v1/me`, and
@@ -103,6 +210,44 @@ Reading the result:
 
 Ion tokens begin `eyJ` (they are JWTs). Do not paste the token into chat; the
 length and first six characters are enough to tell.
+
+## Windows checkouts must be LF — this cost 25 test failures
+
+The operator ran `npm test` on Windows and got **25 failures out of 2,621**,
+on a commit that is green on Linux. None of the failure messages pointed at the
+real cause; they said things like `applyVisualState is missing from ui.js` and
+reported the frozen voice schema as drifted.
+
+**Cause: a CRLF checkout.** Several tests read source files as text and assert
+on exact bytes. Reproduced by converting the files and re-running the
+assertions:
+
+| Assertion | LF | CRLF |
+|---|---|---|
+| `applyVisualState` probe in `src/scenes/director.test.mjs` | matches | **no match** |
+| `GEV_REALTIME_TOOLS` block size | baseline | **+622 bytes**, different SHA |
+
+The probe's regex ends in `\n {2}\}\n`; CRLF puts `\r` before that newline
+and the match returns `null`, which the test reports as the method being
+missing. The schema freeze fails for the same reason — one extra byte per line.
+
+**Fixed** by adding `.gitattributes` with `* text=auto eol=lf`, guarded by
+`src/lineEndings.test.mjs`, which also fails loudly *with the real reason* if a
+future checkout is CRLF anyway.
+
+**An existing Windows checkout does not fix itself** — `.gitattributes` only
+applies on checkout. To re-normalize a clean tree:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+git pull origin main
+git rm --cached -r . -q
+git reset --hard
+npm test
+```
+
+`git reset --hard` discards uncommitted changes, so check `git status` first if
+there is anything local worth keeping.
 
 ## Things that will cost you a cycle
 

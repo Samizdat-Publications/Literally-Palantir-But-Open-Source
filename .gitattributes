@@ -1,0 +1,32 @@
+# Line endings: LF everywhere, Windows included.
+#
+# This is not a style preference — it is load-bearing. Several tests read
+# source files as TEXT and assert on their exact bytes:
+#
+#   * src/firstRunExperience.test.mjs SHA-256s the GEV_REALTIME_TOOLS block
+#     and pins its exact byte length. Measured under a CRLF checkout, that
+#     block grows 622 bytes (one per line) and hashes to something else.
+#   * src/scenes/director.test.mjs probes ui.js with a regex terminated by
+#     "\n  }\n". CRLF puts "\r" before that newline, so the match returns null
+#     and the test reports the method as "missing from ui.js".
+#   * src/layerShedding.test.mjs and others anchor on "\n" the same way.
+#
+# A CRLF checkout therefore fails ~25 tests that have nothing wrong with them,
+# on Windows only, with error messages that all point at the wrong thing.
+# src/lineEndings.test.mjs guards this file.
+* text=auto eol=lf
+
+# Binary assets — never convert, never diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.mp4 binary
+*.glb binary
+*.gltf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
