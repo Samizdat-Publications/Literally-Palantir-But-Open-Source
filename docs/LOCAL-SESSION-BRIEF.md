@@ -59,7 +59,12 @@ succeeding.
 
 ## Repo state — one thing is unmerged and it matters
 
-**[PR #6](https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/pull/6) is an open draft on branch `claude/repo-setup-api-keys-b5jc6x`.** It carries the
+> **Superseded 2026-08-29.** PR #6 is **merged**; `main` carries the
+> `.gitattributes` fix and the operator's checkout was confirmed LF
+> (`git ls-files --eol` → `w/lf`, `npm test` → 2,624 pass / 0 fail). No
+> re-normalization is needed. The rest of this section is kept as history.
+
+**[PR #6](https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/pull/6) was an open draft on branch `claude/repo-setup-api-keys-b5jc6x`.** It carries the
 `.gitattributes` LF fix. Until it lands, a Windows checkout of `main` still
 produces CRLF and `npm test` still fails 25 tests for reasons that look like
 anything but line endings.

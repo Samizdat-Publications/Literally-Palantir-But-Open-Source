@@ -198,7 +198,7 @@ on top of upstream's four.
 **A shot only touches the layers it NAMES.** `sceneLayerPlan` leaves undeclared
 layers exactly as it found them, so a tour that omits a layer inherits whatever
 the previous tour left on — which on a loaded globe is a frame-rate problem.
-Every demo tour therefore declares all 14 registered layers explicitly, most of
+Every demo tour therefore declares all 14 *registry-listed* layers explicitly, most of
 them `false`. `src/demoTours.test.mjs` enforces that.
 
 `sceneLayerPlan` also **drops unregistered layer ids silently**, so a typo in a
@@ -209,7 +209,15 @@ guards against that too. The registered ids are:
 flights  military  earthquakes  satellites  rocket-launches  traffic
 cctv  radio  bikeshare  ais-live-vessels  military-installations
 local-firms  local-dams  local-datacenters
+military-awareness  telegeography-submarine-cables
 ```
+
+**The last two are registered at runtime but missing from
+`REGISTERED_LAYER_IDS` in `src/demoTours.test.mjs`** (verified 2026-08-29 by
+reading `dataManager.getAll()` in a live browser — `scenePolicy.test.mjs` has
+all 16). No tour declares either, so the "declares every layer" guard cannot
+catch a tour inheriting the 2,629-entity cables layer. See
+`docs/VERIFIED-STATE.md`.
 
 Styles: `retro` `surveillance` `thermal` `anime` `noir` `snow`.
 
