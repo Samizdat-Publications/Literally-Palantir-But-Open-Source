@@ -96,11 +96,27 @@ ion could never have accepted it, and no amount of scope or account fixing
 would have helped. Something mangled it on the way into `.env` — a truncated
 or re-encoded paste, or a write that did not round-trip the value.
 
-**The fix is to rewrite the line, not to investigate further.** Mint a fresh
-token at cesium.com/ion/tokens with `assets:read`, then write it in a way that
-cannot mangle it (see below) and **restart the dev server** — Vite bakes
-`import.meta.env` at build time, so editing `.env` under a running server
-changes nothing.
+**Resolved by rewriting the line.** A freshly minted token was verified
+against ion directly on 2026-08-28 — `/v1/me` returned **200**, and every
+asset the app touches returned **200**:
+
+| ion asset | Used by | Result |
+|---|---|---|
+| 1 — Cesium World Terrain | terrain on keyed globe stacks | `200` |
+| 2 — World Imagery | `bing-aerial` chip | `200` |
+| 3 — World Imagery with Labels | `bing-labels` chip | `200` |
+
+Asset 2's response is also the proof of the architecture note above: it carries
+`"externalType":"BING"` and ion's **own** Bing key in `options.key`. Ion brokers
+Bing on the account's behalf, which is exactly why no Bing Maps key exists in
+this app or ever needs to.
+
+The account is on ion's **free tier** — the asset response carries an "Upgrade
+for commercial use" attribution, which must stay visible.
+
+Write the token in a way that cannot mangle it (below) and **restart the dev
+server** — Vite bakes `import.meta.env` at build time, so editing `.env` under
+a running server changes nothing.
 
 To confirm what the corruption actually is, if it recurs:
 
