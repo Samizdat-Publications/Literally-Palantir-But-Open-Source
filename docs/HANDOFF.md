@@ -3,6 +3,11 @@
 Written 2026-08-28. Read `CLAUDE.md` first — it has the landmines. This file is
 state: what is done, what is next, and what will bite.
 
+> **Working locally?** Read
+> [`LOCAL-SESSION-BRIEF.md`](LOCAL-SESSION-BRIEF.md) first — it covers what a
+> local session can verify that no cloud session could, and the preflight to
+> run before touching anything.
+
 ## Where things stand
 
 Branch `claude/repo-setup-api-keys-b5jc6x`, open **draft** PR #5 against `main`.
