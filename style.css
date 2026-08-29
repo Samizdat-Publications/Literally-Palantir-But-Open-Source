@@ -9161,3 +9161,200 @@ body.scene-playback-mode #first-run-launcher {
   /* Scrolling a tile into view must not animate either. */
   .first-run-choices { scroll-behavior: auto; }
 }
+
+/* ── Saved places ─────────────────────────────────────────────────────────
+   A section of the location tray, not a panel: no drag handle, no share-state
+   registration, nothing to re-register. Visual language follows the location
+   pills and the HUD's uppercase mono labels. */
+.saved-places {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 4px 2px;
+  border-top: 1px solid var(--glass-border);
+  margin-top: 6px;
+}
+
+.saved-places-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.saved-places-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.saved-places-btn {
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.saved-places-btn:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: var(--glass-border-hover);
+  color: var(--text-primary);
+}
+
+.saved-places-btn-primary {
+  color: var(--accent);
+  border-color: rgba(0, 212, 255, 0.35);
+}
+
+.saved-places-btn-primary:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.saved-places-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.saved-places-input,
+.saved-places-select {
+  flex: 1 1 120px;
+  min-width: 0;
+  padding: 5px 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  outline: none;
+}
+
+.saved-places-select { flex: 0 0 auto; font-family: var(--font-mono); font-size: 10px; }
+
+.saved-places-input:focus,
+.saved-places-select:focus { border-color: var(--accent); }
+
+.saved-places-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* Capped at 50 entries, so this scrolls rather than pushing the tray
+     off-screen on a long list. */
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.saved-places-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.saved-places-recall {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-places-recall:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.saved-places-scope-chip {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.saved-places-scope-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.saved-places-icon {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.saved-places-icon:hover {
+  border-color: var(--glass-border-hover);
+  color: var(--text-primary);
+}
+
+.saved-places-icon-danger:hover {
+  border-color: rgba(255, 68, 68, 0.6);
+  color: #ff6b6b;
+}
+
+.saved-places-empty {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.55;
+  padding: 4px 2px;
+}
+
+.saved-places-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.saved-places-foot-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.saved-places-status {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.4px;
+  color: var(--accent);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

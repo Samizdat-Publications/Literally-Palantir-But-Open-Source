@@ -1,5 +1,32 @@
 # Saved places — build spec
 
+> ## ✅ Built 2026-08-29
+>
+> Shipped as specified: the section lives in the location tray (no new panel, so
+> no `DRAGGABLE_PANEL_IDS` / `SHARE_PANEL_STATE_*` registration), the serialiser
+> is reused rather than duplicated, and restore is now re-entrant.
+>
+> - `src/savedPlaces.js` — store, fail-closed parsing, caps, scope filter.
+> - `src/data/savedPlacesSeed.js` — seed from `SAVED-VIEWS.md`.
+> - `ShareLinkManager.captureViewState()` / `.restoreViewState()` / `.parseHashState()`.
+> - `LayerStateCoordinator.applyLayerState()` — the mid-session counterpart to
+>   the boot-only `start()`. Needed because the restore callback never carried
+>   layer state; boot handed it to the coordinator separately.
+> - `src/savedPlaces.test.mjs` — 20 tests, including the lane regression.
+>
+> **One correction to the analysis below.** Step 3 said to *reset* the restore
+> lanes. Resetting is not required and would discard live bookkeeping: the lane
+> check compares a snapshot taken at DECODE time against the counters at APPLY
+> time, so a snapshot taken fresh at recall already ignores every earlier claim.
+> Only a claim landing *during* the flight can veto — which is correct, since a
+> user acting mid-recall really should outrank it. Both behaviours are pinned by
+> tests.
+>
+> Verified in the browser, not just in unit tests: seed renders, save persists,
+> recall flies from New York back to 48.8584/2.2945, the hash resumes updating
+> afterwards (proving the guard released), and delete persists. 12/12, 0 console
+> errors.
+
 Requested and approved. Not built. Everything below was read out of the code on
 2026-08-28, so the function names, guards and registries are real.
 
