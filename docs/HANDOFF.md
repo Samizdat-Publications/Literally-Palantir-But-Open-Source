@@ -85,7 +85,59 @@ a well-formed token that ion does not recognise.
    `curl` probe above while leaving the app working — but the app is failing
    too, so this is unlikely on its own.
 
-**Next step is to decode the payload locally.** A JWT payload is base64url, not
+**Decoded on the operator's machine, 2026-08-28: the value is not a JWT.**
+`$t.Split('.').Count` returned **1** — there are **no dots in it at all**,
+where a real token has exactly two. The last four characters rendered as
+`••••`, which is the PowerShell console drawing characters it cannot print.
+
+So the stored value is corrupt, not merely wrong: 293 characters that begin
+`eyJhbG` but carry no segment separators and end in unprintable bytes. Cesium
+ion could never have accepted it, and no amount of scope or account fixing
+would have helped. Something mangled it on the way into `.env` — a truncated
+or re-encoded paste, or a write that did not round-trip the value.
+
+**The fix is to rewrite the line, not to investigate further.** Mint a fresh
+token at cesium.com/ion/tokens with `assets:read`, then write it in a way that
+cannot mangle it (see below) and **restart the dev server** — Vite bakes
+`import.meta.env` at build time, so editing `.env` under a running server
+changes nothing.
+
+To confirm what the corruption actually is, if it recurs:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
+"length: $($t.Length)  dots: $(([char[]]$t | Where-Object {$_ -eq '.'}).Count)"
+"unprintable: $(([char[]]$t | Where-Object {[int]$_ -lt 33 -or [int]$_ -gt 126}).Count)"
+([char[]]$t)[-8..-1] | ForEach-Object { "  '{0}' = U+{1:X4}" -f $_, [int]$_ }
+```
+
+A healthy ion token reports **2 dots and 0 unprintable characters**.
+
+**Writing a key into `.env` without mangling it.** `Read-Host` echoes input in
+PowerShell unless given `-AsSecureString`, and a plain `-replace` silently
+does nothing when the line is absent. This round-trips correctly:
+
+```powershell
+cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+$sec = Read-Host "Paste the Cesium ion token" -AsSecureString
+$val = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+$val = $val.Trim()
+"captured length: $($val.Length)  dots: $(([char[]]$val | Where-Object {$_ -eq '.'}).Count)"
+if ((Get-Content .env) -match '^CESIUM_ION_TOKEN=') {
+  (Get-Content .env) -replace '^CESIUM_ION_TOKEN=.*', "CESIUM_ION_TOKEN=$val" |
+    Set-Content .env -Encoding UTF8
+} else {
+  Add-Content .env "CESIUM_ION_TOKEN=$val" -Encoding UTF8
+}
+```
+
+Check the echoed `dots: 2` before moving on. That one line is the whole
+verification — if it says 0, the paste was mangled again and nothing
+downstream will work.
+
+**Superseded reasoning, kept so it is not re-derived.** A JWT payload is base64url, not
 encrypted, and this reveals scopes, expiry and issuer without sending the token
 anywhere:
 
