@@ -125,8 +125,13 @@ they disagree.
   Bing Maps — ion brokers its own Bing key, confirmed in the asset-2 response.
   There is no Bing Maps key in this app. The stored `CESIUM_ION_TOKEN` had been
   corrupt (293 chars, zero dots where a JWT has two). A fresh token verified
-  `200` against ion assets 1, 2 and 3, and the operator reports it working.
-  **Worth one visual confirmation** that the Aerial chip renders.
+  `200` against ion assets 1, 2 and 3, and the operator has **confirmed every
+  basemap now renders**. Closed — no action needed.
+
+  Four wrong theories died on the way there (wrong key type, truncated paste,
+  missing scope, a shell variable overriding `.env`), each surviving a round
+  because checking it meant another PowerShell paste. `docs/HANDOFF.md` keeps
+  the full trail. This is the clearest argument for verifying locally.
 - **The CRLF test failures.** Root-caused and fixed in PR #6. See above.
 
 ## The operator

@@ -50,9 +50,13 @@ It carries everything below.
    path is done; the UI path is not.
 4. Then the rest of `ROADMAP.md` → Open items.
 
-## Bing/ion 401 — open, diagnosed but not resolved
+## Bing/ion 401 — CLOSED, confirmed working
 
-The operator reports the Bing basemap chips failing with
+**Resolved 2026-08-29. The operator confirms every basemap renders.** Kept in
+full because the reasoning took four wrong turns and none of them should be
+walked again.
+
+The symptom was the Bing basemap chips failing with
 `REQUEST HAS FAILED. STATUS CODE: 401`, "despite having the API key".
 
 **The chip labels are misleading and that is the whole confusion.** There is no
