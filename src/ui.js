@@ -28,10 +28,10 @@ import {
   findPlace,
   importDocument,
   removePlace,
-  seedStoreIfAbsent,
+  syncSeed,
   writeStore,
 } from './savedPlaces.js';
-import { SAVED_PLACES_SEED } from './data/savedPlacesSeed.js';
+import { SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION } from './data/savedPlacesSeed.js';
 import {
   isExplicitLayerStateOrigin,
   LayerStateCoordinator,
@@ -9345,7 +9345,9 @@ export class StyleManager {
    */
   _initSavedPlaces() {
     if (!this._savedPlacesList || !this._savedPlacesForm) return;
-    const { doc } = seedStoreIfAbsent(this._savedPlacesStorage(), SAVED_PLACES_SEED);
+    const { doc } = syncSeed(
+      this._savedPlacesStorage(), SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION,
+    );
     this._savedPlacesDocument = doc;
     this._renderSavedPlaces();
 

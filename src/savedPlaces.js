@@ -142,13 +142,18 @@ export function parseDocument(text) {
     const place = normalizePlace(entry, i);
     if (place && !places.some((p) => p.id === place.id)) places.push(place);
   });
-  return { v: SAVED_PLACES_VERSION, places: places.slice(0, MAX_PLACES) };
+  return {
+    v: SAVED_PLACES_VERSION,
+    seedVersion: Number.isFinite(raw.seedVersion) ? raw.seedVersion : 0,
+    places: places.slice(0, MAX_PLACES),
+  };
 }
 
 /** Serialise a document for storage. */
 export function serializeDocument(doc) {
   return JSON.stringify({
     v: SAVED_PLACES_VERSION,
+    seedVersion: Number.isFinite(doc?.seedVersion) ? doc.seedVersion : 0,
     places: (doc?.places || []).slice(0, MAX_PLACES),
   });
 }
@@ -265,7 +270,7 @@ export function applyScopeToHash(hash, scope) {
  * @param {Array} seed
  * @returns {{doc:{v:number,places:Array}, seeded:boolean}}
  */
-export function seedStoreIfAbsent(storage, seed) {
+export function seedStoreIfAbsent(storage, seed, seedVersion = 0) {
   let existing = null;
   try {
     existing = storage?.getItem?.(SAVED_PLACES_STORAGE_KEY) ?? null;
@@ -277,8 +282,58 @@ export function seedStoreIfAbsent(storage, seed) {
   for (const entry of [...(seed || [])].reverse()) {   // reversed: first seed ends up first
     doc = addPlace(doc, entry).doc;
   }
+  doc.seedVersion = seedVersion;
   writeStore(storage, doc);
   return { doc, seeded: true };
+}
+
+/**
+ * Seed a fresh store, or refresh seed entries after the seed itself changed.
+ *
+ * `seedStoreIfAbsent` alone is not enough: it fires only when the key is absent,
+ * so a fix to a seed bookmark would never reach anyone who had already loaded
+ * the app once. On a `seedVersion` bump this refreshes the hash, scope and note
+ * of any seed entry STILL PRESENT, and:
+ *
+ *   - never resurrects a seed entry the user deleted — deletions stay deleted,
+ *     which is the same rule `seedStoreIfAbsent` enforces;
+ *   - never touches a place the user created;
+ *   - keeps the user's `name`, since renaming is theirs and the id follows it.
+ *
+ * A renamed seed entry no longer matches by id and is therefore left alone,
+ * which is the safe direction: the user has made it their own.
+ *
+ * @param {Storage} storage
+ * @param {Array} seed
+ * @param {number} seedVersion
+ * @returns {{doc:{v:number,seedVersion:number,places:Array}, seeded:boolean, refreshed:string[]}}
+ */
+export function syncSeed(storage, seed, seedVersion = 0) {
+  const first = seedStoreIfAbsent(storage, seed, seedVersion);
+  if (first.seeded) return { ...first, refreshed: [] };
+
+  const doc = first.doc;
+  if ((doc.seedVersion || 0) === seedVersion) return { doc, seeded: false, refreshed: [] };
+
+  const refreshed = [];
+  const places = doc.places.map((place) => {
+    const match = (seed || []).find((entry) => slugify(entry.name) === place.id);
+    if (!match) return place;
+    const hash = String(match.hash || '').trim().replace(/^#/, '');
+    if (!isStorableHash(hash)) return place;
+    if (hash === place.hash && match.scope === place.scope) return place;
+    refreshed.push(place.id);
+    return {
+      ...place,
+      hash,
+      scope: PLACE_SCOPES.includes(match.scope) ? match.scope : place.scope,
+      note: clampText(match.note, MAX_NOTE_LENGTH) || place.note,
+    };
+  });
+
+  const next = { ...doc, seedVersion, places };
+  writeStore(storage, next);
+  return { doc: next, seeded: false, refreshed };
 }
 
 /**

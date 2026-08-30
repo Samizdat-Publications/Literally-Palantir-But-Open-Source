@@ -29,9 +29,15 @@ import {
   seedStoreIfAbsent,
   serializeDocument,
   slugify,
+  syncSeed,
   writeStore,
 } from './savedPlaces.js';
-import { SAVED_PLACES_SEED } from './data/savedPlacesSeed.js';
+import {
+  SAVED_PLACES_SEED,
+  SAVED_PLACES_SEED_VERSION,
+  SF_WORKING_SET_LAYERS,
+} from './data/savedPlacesSeed.js';
+import { REGISTERED_LAYER_IDS } from './data/layerState.js';
 
 const FULL_HASH = 'v=2&lat=37.7738&lon=-122.4232&alt=100&heading=180&pitch=-22&roll=360'
   + '&style=crt&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1'
@@ -308,6 +314,34 @@ test('every seeded place parses and decodes against the real share decoder', () 
   }
 });
 
+test('the SF seed enables exactly its working set and turns everything else off', () => {
+  // The `l=` token is opaque (`b.c.i.r.t`) and trivial to get wrong by hand, so
+  // this asserts against the named list rather than the encoding. It also pins
+  // the OFF half: the view as originally captured had ten layers on, including
+  // ~7,700 entities of static reference geometry that show nothing at 100 m.
+  const manager = makeManager('');
+  const sf = SAVED_PLACES_SEED.find((entry) => /SF Market Street/.test(entry.name));
+  assert.ok(sf, 'the SF seed must exist');
+  assert.equal(sf.scope, 'full',
+    'the layer set only applies on a full-scope recall; camera scope leaves layers alone');
+
+  const enabled = manager.parseHashState(sf.hash).layerState?.enabledLayerIds || [];
+  assert.deepEqual([...enabled].sort(), [...SF_WORKING_SET_LAYERS].sort());
+
+  for (const id of REGISTERED_LAYER_IDS) {
+    if (SF_WORKING_SET_LAYERS.includes(id)) continue;
+    assert.equal(enabled.includes(id), false, `${id} must be off in the SF seed`);
+  }
+});
+
+test('the SF seed does not force a visual style change on recall', () => {
+  // A recall is a state swap the user asked for, but flipping the whole look to
+  // retro green is not what "take me back to this place" should mean.
+  const manager = makeManager('');
+  const sf = SAVED_PLACES_SEED.find((entry) => /SF Market Street/.test(entry.name));
+  assert.equal(manager.parseHashState(sf.hash).style, 'normal');
+});
+
 test('seeding happens only when the key is absent, so deletions stay deleted', () => {
   const fresh = fakeStorage();
   const first = seedStoreIfAbsent(fresh, SAVED_PLACES_SEED);
@@ -323,6 +357,42 @@ test('seeding happens only when the key is absent, so deletions stay deleted', (
   const third = seedStoreIfAbsent(emptied, SAVED_PLACES_SEED);
   assert.equal(third.seeded, false, 'deleted bookmarks must not come back');
   assert.deepEqual(third.doc.places, []);
+});
+
+test('a seed fix reaches a store that was already written', () => {
+  // Without this, seeding-only-when-absent means anyone who loaded the app once
+  // keeps the old bookmark forever and never sees a correction.
+  const stale = { ...SAVED_PLACES_SEED[0], hash: 'v=2&lat=1&lon=2&l=a.c.e.q.d.w.i.r.u.t', scope: 'camera' };
+  const storage = fakeStorage();
+  const seeded = seedStoreIfAbsent(storage, [stale], 1);
+  assert.equal(seeded.doc.places[0].hash, stale.hash);
+
+  const synced = syncSeed(storage, SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION);
+  assert.deepEqual(synced.refreshed, [slugify(SAVED_PLACES_SEED[0].name)]);
+  assert.equal(synced.doc.places[0].hash, SAVED_PLACES_SEED[0].hash, 'hash must be refreshed');
+  assert.equal(synced.doc.places[0].scope, 'full', 'scope must be refreshed');
+  assert.equal(synced.doc.seedVersion, SAVED_PLACES_SEED_VERSION);
+
+  // Idempotent: a second run at the same version changes nothing.
+  assert.deepEqual(syncSeed(storage, SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION).refreshed, []);
+});
+
+test('a seed refresh never resurrects a deleted place or touches the user\'s own', () => {
+  const storage = fakeStorage();
+  seedStoreIfAbsent(storage, SAVED_PLACES_SEED, 1);
+
+  // The user deletes the seed entry and saves one of their own.
+  let doc = removePlace(readStore(storage), slugify(SAVED_PLACES_SEED[0].name));
+  doc = addPlace(doc, { name: 'Mine', hash: FULL_HASH, scope: 'camera' }).doc;
+  doc.seedVersion = 1;
+  writeStore(storage, doc);
+
+  const synced = syncSeed(storage, SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION);
+  assert.deepEqual(synced.refreshed, [], 'nothing to refresh — the seed entry is gone');
+  assert.equal(synced.doc.places.length, 1, 'the deleted seed must not come back');
+  assert.equal(synced.doc.places[0].name, 'Mine');
+  assert.equal(synced.doc.places[0].hash, FULL_HASH, 'a user place must be left alone');
+  assert.equal(synced.doc.places[0].scope, 'camera');
 });
 
 test('seeding degrades quietly when storage is unavailable', () => {
