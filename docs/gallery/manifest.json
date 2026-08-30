@@ -154,6 +154,13 @@
       "title": "Fort Sill — Old Post",
       "caption": "The historic Old Post quadrangle and the artillery park.",
       "source": "qa-shots/dest/bases-4-Fort-Sill-Old-Post.png"
+    },
+    {
+      "slug": "conflict-emed",
+      "section": "Conflict",
+      "title": "Conflict watch — Eastern Mediterranean",
+      "caption": "The Conflict watch saved place recalled: live vessels, civil and military flights, and mapped installations, at 150 km. NASA FIRMS is deliberately off — see docs/CONFLICT-VIEW.md for why.",
+      "source": "qa-shots/dest/conflict-emed.png"
     }
   ]
 }

@@ -145,3 +145,11 @@ The 250 ft free-fall towers around the circular landing field. Shown in the CRT 
 The historic Old Post quadrangle and the artillery park.
 
 ![Fort Sill — Old Post](bases-sill-oldpost.jpg)
+
+## Conflict
+
+### Conflict watch — Eastern Mediterranean
+
+The Conflict watch saved place recalled: live vessels, civil and military flights, and mapped installations, at 150 km. NASA FIRMS is deliberately off — see docs/CONFLICT-VIEW.md for why.
+
+![Conflict watch — Eastern Mediterranean](conflict-emed.jpg)

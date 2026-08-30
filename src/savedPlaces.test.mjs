@@ -415,8 +415,9 @@ test('a seed refresh never resurrects a deleted place or touches the user\'s own
   const storage = fakeStorage();
   seedStoreIfAbsent(storage, SAVED_PLACES_SEED, 1);
 
-  // The user deletes the seed entry and saves one of their own.
-  let doc = removePlace(readStore(storage), slugify(SAVED_PLACES_SEED[0].name));
+  // The user deletes EVERY seeded entry and saves one of their own.
+  let doc = readStore(storage);
+  for (const entry of SAVED_PLACES_SEED) doc = removePlace(doc, slugify(entry.name));
   doc = addPlace(doc, { name: 'Mine', hash: FULL_HASH, scope: 'camera' }).doc;
   doc.seedVersion = 1;
   writeStore(storage, doc);
@@ -433,4 +434,26 @@ test('seeding degrades quietly when storage is unavailable', () => {
   const result = seedStoreIfAbsent(fakeStorage({ throwOn: 'both' }), SAVED_PLACES_SEED);
   assert.equal(result.seeded, false);
   assert.deepEqual(result.doc.places, []);
+});
+
+
+test('the conflict seed carries the theatre layer set and omits FIRMS', () => {
+  // FIRMS is the layer people reach for first and the one that must stay off:
+  // over Ukraine it painted hundreds of agricultural stubble fires as though
+  // the country were ablaze. Its absence here is a decision, not an oversight.
+  const manager = makeManager('');
+  const watch = SAVED_PLACES_SEED.find((entry) => /Conflict watch/.test(entry.name));
+  assert.ok(watch, 'the conflict seed must exist');
+  assert.equal(watch.scope, 'full', 'it exists to turn layers on, so it cannot be camera-scoped');
+
+  const state = manager.parseHashState(watch.hash);
+  const enabled = state.layerState?.enabledLayerIds || [];
+  assert.deepEqual([...enabled].sort(),
+    ['ais-live-vessels', 'flights', 'military', 'military-installations']);
+  assert.equal(enabled.includes('local-firms'), false,
+    'FIRMS must stay off by default — agricultural burning reads as war damage');
+
+  // Above roughly 200 km the vessel layer draws nothing, which is what made the
+  // first continental framing look like a broken app.
+  assert.ok(state.alt <= 200000, 'a conflict view must sit low enough for vessels to draw');
 });

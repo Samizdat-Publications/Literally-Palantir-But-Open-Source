@@ -22,8 +22,10 @@
  *
  * 2 — 2026-08-29: SF view narrowed from ten layers to the five-layer working
  *     set, and `style=crt` relaxed to `normal`.
+ * 3 — 2026-08-30: SF view back on `style=crt` (now the app default), and the
+ *     Conflict watch seed added.
  */
-export const SAVED_PLACES_SEED_VERSION = 2;
+export const SAVED_PLACES_SEED_VERSION = 3;
 
 /**
  * @typedef {object} SeedPlace
@@ -74,6 +76,31 @@ export const SAVED_PLACES_SEED = Object.freeze([
     // bookmark, and a camera-scoped place deliberately leaves layers alone.
     scope: 'full',
     note: 'San Francisco, Market Street near Guerrero/Duboce. Traffic, CCTV, radio, bikeshare.',
+  }),
+
+  Object.freeze({
+    name: 'Conflict watch — E. Mediterranean',
+    // `l=a.f.m.i` — live vessels, civil flights, military flights, and mapped
+    // installations. This is the layer set for watching a theatre with the
+    // open-source feeds the app carries.
+    //
+    // NASA FIRMS is deliberately NOT in it, though it is the layer people reach
+    // for first. Measured over Ukraine on 2026-08-30, FIRMS painted the whole
+    // country in hundreds of 15-190 MW thermal detections — late-August
+    // agricultural stubble burning, not war damage. It looks like the country
+    // is ablaze and means almost nothing. Turn it on knowingly at close range;
+    // do not ship it on by default. See docs/CONFLICT-VIEW.md.
+    //
+    // Heading 285 looks WEST over the sea. At 90 the frame filled with Syria
+    // and the vessels the layer set exists for were all behind the camera.
+    // 150 km altitude, not a continental framing: the vessel layer stops
+    // drawing above roughly 200 km, so a wider view shows empty water.
+    hash: 'v=2&lat=33.6000&lon=34.3000&alt=150000&heading=285&pitch=-35&roll=0'
+      + '&style=crt&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1'
+      + '&dm=OFF&dd=50&da=elastic&kf=7&ko=1&cr=0&sc=1&scf=11&map=photoreal'
+      + '&l=a.f.m.i&lo=f.e.1',
+    scope: 'full',
+    note: 'Eastern Mediterranean. Vessels, civil and military flights, mapped installations.',
   }),
 ]);
 

@@ -193,6 +193,42 @@ export const CITY_POIS = {
       { name: 'Fort Sill — Main Post', lat: 34.6497, lon: -98.4226, alt: 2600, pitch: -22, heading: 45, buildingHeight: 10, groundElevation: 360 },
     ],
   },
+
+  /**
+   * Conflict theatres — camera positions for the open-source feeds this app
+   * carries. Pair with the "Conflict watch" saved place, which turns on the
+   * layer set; a bucket only moves the camera.
+   *
+   * Ranges are ~130-190 km on purpose. Measured 2026-08-30: the vessel layer
+   * draws nothing above roughly 200 km, so the continental framings that felt
+   * natural for a "war map" showed empty terrain and read as a broken app.
+   *
+   * READ docs/CONFLICT-VIEW.md BEFORE ADDING ENTRIES. What these feeds can and
+   * cannot show is not obvious, and two theatres people ask for first — the
+   * Strait of Hormuz and Bab el-Mandeb — currently have ZERO vessels in the
+   * AISStream feed, because it is crowd-sourced from shore receivers and those
+   * waters have none. They are kept below as terrain views, honestly labelled,
+   * rather than dropped: the chokepoint itself is worth seeing, and coverage
+   * can change.
+   */
+  conflict: {
+    name: 'Conflict',
+    groundElevation: 0,
+    pois: [
+      // 296 vessels in-box at capture — the best-covered theatre of these.
+      { name: 'E. Mediterranean — Levant', lat: 33.6, lon: 34.3, alt: 150000, pitch: -35, heading: 285, buildingHeight: 0, groundElevation: 0 },
+      // 62 vessels — the Odesa grain-corridor approaches.
+      { name: 'Black Sea — Odesa approaches', lat: 46.0, lon: 30.9, alt: 150000, pitch: -35, heading: 180, buildingHeight: 0, groundElevation: 0 },
+      // Ukraine's airspace is closed, so the civil-traffic VOID is the signal.
+      // Framed wide enough to hold the ring of European traffic around it,
+      // otherwise the absence just looks like a layer that failed to load.
+      { name: 'Ukraine — closed airspace', lat: 48.5, lon: 31.5, alt: 620000, pitch: -50, heading: 0, buildingHeight: 0, groundElevation: 0 },
+      // Terrain only: no AIS coverage here at present. See the doc.
+      { name: 'Strait of Hormuz', lat: 26.6, lon: 56.35, alt: 130000, pitch: -35, heading: 45, buildingHeight: 0, groundElevation: 0 },
+      { name: 'Bab el-Mandeb', lat: 12.6, lon: 43.35, alt: 130000, pitch: -35, heading: 0, buildingHeight: 0, groundElevation: 0 },
+      { name: 'Suez Canal', lat: 30.1, lon: 32.55, alt: 140000, pitch: -40, heading: 0, buildingHeight: 0, groundElevation: 0 },
+    ],
+  },
 };
 
 /**
