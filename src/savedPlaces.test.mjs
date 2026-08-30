@@ -9,8 +9,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { ShareLinkManager } from './sharelink.js';
 import {
+  DEFAULT_PLACE_SCOPE,
   MAX_NAME_LENGTH,
   MAX_PLACES,
   SAVED_PLACES_STORAGE_KEY,
@@ -191,6 +193,36 @@ test('export and import round-trip, and import fails closed on a future version'
 });
 
 // ── Scope ───────────────────────────────────────────────────────────────────
+
+test('a new place defaults to position-only, in the store AND in the markup', () => {
+  // Two places encode this default — the addPlace() parameter and the `selected`
+  // attribute on the <select> — and nothing else would notice them disagreeing.
+  // The visible symptom would be a bookmark that silently replays a whole layer
+  // set the user never asked it to carry.
+  assert.equal(DEFAULT_PLACE_SCOPE, 'camera');
+  assert.equal(
+    addPlace(emptyDocument(), { name: 'Unspecified', hash: FULL_HASH }).place.scope,
+    DEFAULT_PLACE_SCOPE,
+  );
+
+  const markup = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const select = markup.slice(
+    markup.indexOf('id="saved-places-scope"'),
+    markup.indexOf('</select>', markup.indexOf('id="saved-places-scope"')),
+  );
+  assert.ok(select, 'the saved-places scope select must exist');
+  const selected = [...select.matchAll(/<option value="([a-z]+)"([^>]*)>/g)]
+    .filter(([, , attrs]) => /\bselected\b/.test(attrs))
+    .map(([, value]) => value);
+  assert.deepEqual(selected, [DEFAULT_PLACE_SCOPE],
+    'exactly one option must be marked selected, and it must match DEFAULT_PLACE_SCOPE');
+
+  // An explicit choice still wins over the default.
+  assert.equal(
+    addPlace(emptyDocument(), { name: 'Explicit', hash: FULL_HASH, scope: 'full' }).place.scope,
+    'full',
+  );
+});
 
 test('camera scope keeps position and basemap and drops everything else', () => {
   const camera = new URLSearchParams(applyScopeToHash(FULL_HASH, 'camera'));

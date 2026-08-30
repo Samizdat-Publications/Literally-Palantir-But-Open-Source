@@ -584,9 +584,18 @@
           </div>
           <form class="saved-places-form" id="saved-places-form" hidden>
             <input type="text" id="saved-places-name" class="saved-places-input" placeholder="Name this view..." autocomplete="off" spellcheck="false" maxlength="80" />
+            <!--
+              "Position only" is the DEFAULT on purpose, even though it is the
+              second entry: a new bookmark should not be able to drag a whole
+              layer set, style and panel layout onto whatever the user is doing
+              when they later recall it. Opting up to "Everything" is one click
+              and is the deliberate choice; the order is kept so the fuller
+              option still reads first. DEFAULT_PLACE_SCOPE in savedPlaces.js
+              mirrors this, and a test pins the two together.
+            -->
             <select id="saved-places-scope" class="saved-places-select" title="What this bookmark replays">
               <option value="full">Everything</option>
-              <option value="camera">Position only</option>
+              <option value="camera" selected>Position only</option>
             </select>
             <button type="submit" class="saved-places-btn saved-places-btn-primary">SAVE</button>
             <button type="button" id="saved-places-cancel" class="saved-places-btn">CANCEL</button>

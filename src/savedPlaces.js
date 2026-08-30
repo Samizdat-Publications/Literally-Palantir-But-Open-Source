@@ -44,6 +44,25 @@ export const MAX_NOTE_LENGTH = 200;
 export const PLACE_SCOPES = Object.freeze(['full', 'camera']);
 
 /**
+ * Scope a NEW place gets unless the user says otherwise.
+ *
+ * `camera`, deliberately. A bookmark saved casually should not be able to drag
+ * a whole layer set, visual style and panel layout onto whatever the user is
+ * doing when they recall it half an hour later — the surprising direction is
+ * the one that changes state they did not ask about. Opting up to `full` is one
+ * click, and the SF seed does exactly that because enforcing a layer set is its
+ * whole purpose.
+ *
+ * The `<select>` in index.html marks the matching option `selected`; a test
+ * pins the two together so they cannot drift.
+ *
+ * NOT the same as `normalizePlace`'s fallback, which stays `full`: that one is
+ * about READING an entry whose scope is missing, and such an entry can only
+ * come from a hand-edited or imported file written under the older semantics.
+ */
+export const DEFAULT_PLACE_SCOPE = 'camera';
+
+/**
  * Params a `camera` place replays. Deliberately NOT everything positional —
  * `map` is included because a photoreal view recalled onto a 2D basemap is not
  * the same place, but style, layers and panels are left exactly as the user
@@ -195,7 +214,9 @@ export function writeStore(storage, doc) {
  * saving over a name the user already used behaves like an update.
  * @returns {{doc:{v:number,places:Array}, place:object|null, reason:string|null}}
  */
-export function addPlace(doc, { name, hash, note = '', scope = 'full', savedAt = 0 } = {}) {
+export function addPlace(doc, {
+  name, hash, note = '', scope = DEFAULT_PLACE_SCOPE, savedAt = 0,
+} = {}) {
   const base = doc?.places ? { ...doc, places: [...doc.places] } : emptyDocument();
   const cleanHash = typeof hash === 'string' ? hash.trim().replace(/^#/, '') : '';
   if (!isStorableHash(cleanHash)) return { doc: base, place: null, reason: 'invalid-hash' };
