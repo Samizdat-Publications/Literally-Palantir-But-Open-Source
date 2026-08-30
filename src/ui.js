@@ -212,6 +212,17 @@ const TRANSITION_DURATION_MS = 500;
 const STYLES = { retro: retroShader, surveillance: nightVisionShader, thermal: thermalShader, anime: animeShader, noir: noirShader, snow: snowShader };
 /** Versioned localStorage namespace prefix to invalidate stale panel layouts. */
 const PANEL_LAYOUT_STORAGE_VERSION = 'v6';
+
+/**
+ * Hotkeys for the POI row, in display order — the keyboard's top row.
+ *
+ * Eight, not the original five: the global Wonders and Nature buckets carry
+ * more entries than a city does. Beyond this list `_expandPOIRow` falls back to
+ * a numeric badge, so a longer bucket still renders, it just loses its hotkey.
+ * Y, U and I were free — the only other single-key binding in the app is `c`
+ * for the cockpit.
+ */
+const POI_HOTKEYS = Object.freeze(['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I']);
 const SHARE_PANEL_STATE_SPECS = Object.freeze([
   { id: 'control-panel', pinnable: true },
   { id: 'location-bar', pinnable: true },
@@ -9590,7 +9601,6 @@ export class StyleManager {
   }
 
   _initLocationBar() {
-    const QWERTY_KEYS = ['Q', 'W', 'E', 'R', 'T'];
 
     // Render city pills (no submenu wrappers — POI row is separate)
     for (const [cityId, city] of Object.entries(CITY_POIS)) {
@@ -9611,7 +9621,7 @@ export class StyleManager {
         || e.target === this._locationSearch;
       if (isFormControl) return;
 
-      const keyIndex = QWERTY_KEYS.indexOf(e.key.toUpperCase());
+      const keyIndex = POI_HOTKEYS.indexOf(e.key.toUpperCase());
       if (keyIndex === -1) return;
 
       const city = CITY_POIS[this._expandedCityId];
@@ -9800,7 +9810,6 @@ export class StyleManager {
    * @returns {void}
    */
   _expandPOIRow(cityId) {
-    const QWERTY_KEYS = ['Q', 'W', 'E', 'R', 'T'];
     const city = CITY_POIS[cityId];
     if (!city) return;
 
@@ -9812,7 +9821,7 @@ export class StyleManager {
       const pill = document.createElement('button');
       pill.className = 'poi-pill';
       pill.dataset.poiIndex = idx;
-      pill.innerHTML = `<span class="poi-pill-key">${QWERTY_KEYS[idx] || idx + 1}</span><span class="poi-pill-name">${poi.name}</span>`;
+      pill.innerHTML = `<span class="poi-pill-key">${POI_HOTKEYS[idx] || idx + 1}</span><span class="poi-pill-name">${poi.name}</span>`;
       pill.addEventListener('click', () => this._onPoiClick(cityId, idx));
       this._poiRow.appendChild(pill);
     });

@@ -2,8 +2,10 @@ import * as Cesium from 'cesium';
 import { viewportBias, placesNearViewRecovery } from './annotations/annotationResolver.js';
 
 /**
- * Points of Interest per city.
- * Each city has 5 POIs; the first is the default fly-to landmark.
+ * Points of Interest per bucket.
+ * City buckets carry 5 POIs; the global Wonders and Nature buckets carry more.
+ * The first entry is the default fly-to landmark. POI_HOTKEYS in ui.js binds
+ * the first eight to keys; beyond that a numeric badge is shown instead.
  *
  * Field reference:
  *   alt     — RANGE (distance from target in meters), NOT absolute altitude
@@ -115,6 +117,57 @@ export const CITY_POIS = {
       { name: 'Lincoln Memorial', lat: 38.8893, lon: -77.0502, alt: 400, pitch: -25, heading: 90, buildingHeight: 20 },
       { name: 'Pentagon', lat: 38.8711, lon: -77.0559, alt: 800, pitch: -40, heading: 0, buildingHeight: 20 },
       { name: 'Jefferson Memorial', lat: 38.8814, lon: -77.0365, alt: 400, pitch: -30, heading: 0, buildingHeight: 25 },
+    ],
+  },
+
+  // ── Global buckets ──────────────────────────────────────────────────────
+  //
+  // Unlike the city buckets above, these span the planet, so:
+  //
+  //   * no `viewBounds` — an "overview" of a global set is meaningless, and
+  //     flyToPresetLocation already falls through to the first POI without it;
+  //   * `groundElevation` is per-POI rather than per-bucket. That field is the
+  //     FALLBACK terrain height, and with Google 3D Tiles the globe carries no
+  //     terrain (`globe.getHeight` returns null), so the fallback is what every
+  //     first fly-to actually uses. One bucket-wide number cannot serve both a
+  //     sea-level bay and a 3,000 m alpine summit.
+  //
+  // Every entry below was verified by flying to it and looking at the result;
+  // candidates that Google's photorealistic coverage cannot carry were cut
+  // rather than shipped. See docs/DESTINATIONS.md for what was rejected and why.
+
+  wonders: {
+    name: 'Wonders',
+    groundElevation: 0,
+    pois: [
+      // GSD 0.10 m at this framing — the sharpest site in the set. The
+      // hypogeum floor is legible inside the arena.
+      { name: 'Colosseum', lat: 41.8902, lon: 12.4924, alt: 380, pitch: -35, heading: 300, buildingHeight: 24, groundElevation: 20 },
+      // GSD 0.11 m. El Castillo centre-frame with the Temple of the Warriors.
+      { name: 'Chichén Itzá', lat: 20.6829, lon: -88.5686, alt: 500, pitch: -28, heading: 45, buildingHeight: 24, groundElevation: 30 },
+      { name: 'Great Pyramid of Giza', lat: 29.9792, lon: 31.1342, alt: 900, pitch: -25, heading: 135, buildingHeight: 70, groundElevation: 60 },
+      { name: 'Taj Mahal', lat: 27.1751, lon: 78.0421, alt: 600, pitch: -25, heading: 0, buildingHeight: 35, groundElevation: 170 },
+      // Tuned by trial: at range 700 the flight settled on Sugarloaf and the
+      // geocoder read back "Heliponto Morro Urca" — the right vista, the wrong
+      // subject. 420 m at a shallow -12 deg puts the statue itself on the
+      // Corcovado summit with Rio and the Atlantic behind it, and the readout
+      // now confirms "Christ the Redeemer, Estrada do Corcovado".
+      { name: 'Christ the Redeemer', lat: -22.9519, lon: -43.2105, alt: 420, pitch: -12, heading: 110, buildingHeight: 20, groundElevation: 700 },
+    ],
+  },
+
+  nature: {
+    name: 'Nature',
+    groundElevation: 0,
+    pois: [
+      { name: 'Grand Canyon', lat: 36.0616, lon: -112.1077, alt: 4200, pitch: -18, heading: 250, buildingHeight: 0, groundElevation: 2100 },
+      // GSD 0.22 m. Horseshoe Falls sits centre-frame with the whole cataract.
+      { name: 'Niagara Falls', lat: 43.0790, lon: -79.0750, alt: 900, pitch: -25, heading: 315, buildingHeight: 0, groundElevation: 170 },
+      { name: 'Matterhorn', lat: 45.9763, lon: 7.6586, alt: 5000, pitch: -10, heading: 45, buildingHeight: 0, groundElevation: 3000 },
+      { name: 'Uluru', lat: -25.3444, lon: 131.0369, alt: 2600, pitch: -22, heading: 45, buildingHeight: 0, groundElevation: 860 },
+      { name: 'Grand Prismatic Spring', lat: 44.5251, lon: -110.8382, alt: 1200, pitch: -35, heading: 0, buildingHeight: 0, groundElevation: 2200 },
+      { name: 'Iguazú Falls', lat: -25.6867, lon: -54.4450, alt: 1500, pitch: -22, heading: 225, buildingHeight: 0, groundElevation: 170 },
+      { name: 'Yosemite Valley', lat: 37.7156, lon: -119.6773, alt: 6500, pitch: -8, heading: 70, buildingHeight: 0, groundElevation: 1300 },
     ],
   },
 };
@@ -280,7 +333,9 @@ export function flyToPresetLocation(viewer, locationId, options = {}) {
     heading: poi.heading || 0,
     buildingHeight: poi.buildingHeight || 30,
     buildingBounds: poi.buildingBounds || null,
-    groundElevation: city.groundElevation || 0,
+    // Per-POI wins: the global buckets span sea level to alpine summits, and
+    // this is the fallback the FIRST fly-to always uses under Google 3D Tiles.
+    groundElevation: poi.groundElevation ?? city.groundElevation ?? 0,
     ...options,
   });
 }
@@ -299,7 +354,7 @@ export function flyToPOI(viewer, cityId, poiIndex, options = {}) {
     heading: poi.heading || 0,
     buildingHeight: poi.buildingHeight || 30,
     buildingBounds: poi.buildingBounds || null,
-    groundElevation: city.groundElevation || 0,
+    groundElevation: poi.groundElevation ?? city.groundElevation ?? 0,
     ...options,
   });
 }
