@@ -125,3 +125,23 @@ Press O after flying to a destination and the camera circles it at about 6°/sec
 ### Orbit — continuing
 
 ![Orbit — continuing](orbit-3.jpg)
+
+## Bases
+
+### Fort Bragg — Pope Field
+
+The Pope Field runway, taxiways and hangar line. GSD 0.28 m.
+
+![Fort Bragg — Pope Field](bases-bragg-pope.jpg)
+
+### Fort Benning — Airborne School
+
+The 250 ft free-fall towers around the circular landing field. Shown in the CRT style the app now opens in.
+
+![Fort Benning — Airborne School](bases-benning-airborne.jpg)
+
+### Fort Sill — Old Post
+
+The historic Old Post quadrangle and the artillery park.
+
+![Fort Sill — Old Post](bases-sill-oldpost.jpg)

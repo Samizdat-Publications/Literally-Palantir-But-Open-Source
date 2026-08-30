@@ -133,6 +133,27 @@
       "title": "Orbit — continuing",
       "caption": "",
       "source": "qa-shots/dest/orbit-3.png"
+    },
+    {
+      "slug": "bases-bragg-pope",
+      "section": "Bases",
+      "title": "Fort Bragg — Pope Field",
+      "caption": "The Pope Field runway, taxiways and hangar line. GSD 0.28 m.",
+      "source": "qa-shots/dest/bases-0-Fort-Bragg-Pope-Field.png"
+    },
+    {
+      "slug": "bases-benning-airborne",
+      "section": "Bases",
+      "title": "Fort Benning — Airborne School",
+      "caption": "The 250 ft free-fall towers around the circular landing field. Shown in the CRT style the app now opens in.",
+      "source": "qa-shots/dest/bases-2-Fort-Benning-Airborne-School.png"
+    },
+    {
+      "slug": "bases-sill-oldpost",
+      "section": "Bases",
+      "title": "Fort Sill — Old Post",
+      "caption": "The historic Old Post quadrangle and the artillery park.",
+      "source": "qa-shots/dest/bases-4-Fort-Sill-Old-Post.png"
     }
   ]
 }

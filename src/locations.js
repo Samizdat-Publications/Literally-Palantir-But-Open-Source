@@ -170,6 +170,29 @@ export const CITY_POIS = {
       { name: 'Yosemite Valley', lat: 37.7156, lon: -119.6773, alt: 6500, pitch: -8, heading: 70, buildingHeight: 0, groundElevation: 1300 },
     ],
   },
+
+  // US Army posts. All three carry good photogrammetry — these are ordinary
+  // public installations that appear on every commercial map, and the app
+  // already surfaces OSM-mapped installations as a data layer.
+  //
+  // Coordinates came from the Google Geocoding API rather than memory, after a
+  // hand-guessed Airborne School position landed ~2 km off in base housing.
+  // Worth knowing: "Sicily Drop Zone, Fort Bragg" geocodes to Fort Bragg,
+  // CALIFORNIA — the town — so anything here needs its state spelled out.
+  bases: {
+    name: 'Bases',
+    groundElevation: 0,
+    pois: [
+      { name: 'Fort Bragg — Pope Field', lat: 35.1714, lon: -79.0173, alt: 1400, pitch: -28, heading: 90, buildingHeight: 10, groundElevation: 70 },
+      { name: 'Fort Bragg — Main Post', lat: 35.1394, lon: -79.0052, alt: 1800, pitch: -25, heading: 135, buildingHeight: 10, groundElevation: 75 },
+      // The 250 ft free-fall towers stand around the circular landing field.
+      { name: 'Fort Benning — Airborne School', lat: 32.3543, lon: -84.9720, alt: 1100, pitch: -25, heading: 70, buildingHeight: 20, groundElevation: 100 },
+      { name: 'Fort Benning — Main Post', lat: 32.3531, lon: -84.9552, alt: 2200, pitch: -25, heading: 315, buildingHeight: 10, groundElevation: 100 },
+      // The historic Old Post quadrangle, stone buildings and the artillery park.
+      { name: 'Fort Sill — Old Post', lat: 34.6707, lon: -98.3865, alt: 900, pitch: -28, heading: 200, buildingHeight: 15, groundElevation: 360 },
+      { name: 'Fort Sill — Main Post', lat: 34.6497, lon: -98.4226, alt: 2600, pitch: -22, heading: 45, buildingHeight: 10, groundElevation: 360 },
+    ],
+  },
 };
 
 /**
