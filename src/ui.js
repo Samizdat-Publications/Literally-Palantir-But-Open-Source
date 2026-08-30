@@ -223,6 +223,21 @@ const PANEL_LAYOUT_STORAGE_VERSION = 'v6';
  * for the cockpit.
  */
 const POI_HOTKEYS = Object.freeze(['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I']);
+
+/**
+ * Style the app opens in — hotkey 2, the CRT/retro treatment.
+ *
+ * Chosen because it reads like a CCTV monitor, which is the whole point of the
+ * console; hotkey 1 (`normal`) is the unfiltered globe and stays one keypress
+ * away. Applied at boot rather than assigned to `activeStyle` directly:
+ * `setStyle()` early-returns when the requested style already matches, so
+ * pre-setting the field would leave the label saying RETRO with no shader
+ * actually composited.
+ *
+ * A share link or saved place carries its own style, and that must win — this
+ * is only the default for a session that arrives with nothing to restore.
+ */
+const DEFAULT_STYLE = 'retro';
 const SHARE_PANEL_STATE_SPECS = Object.freeze([
   { id: 'control-panel', pinnable: true },
   { id: 'location-bar', pinnable: true },
@@ -2679,6 +2694,11 @@ export class StyleManager {
     this._initHUDToggle();
     this._initModels3dToggle();
     this._applyGlobalPostDefaults();
+    // Only when nothing is being restored: an incoming share/saved view owns
+    // the style, and stomping it here would silently discard what the link said.
+    if (!this._initialShareState) {
+      this.setStyle(DEFAULT_STYLE, { revealParameters: false, restore: true });
+    }
     this._initOrbit();
     this._initRecordingOverlay();
     this._startAnimationLoop();

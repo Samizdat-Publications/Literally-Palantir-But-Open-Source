@@ -61,11 +61,12 @@ export const SAVED_PLACES_SEED = Object.freeze([
     // facing south. Two deliberate changes from that capture:
     //   * `l=b.c.i.r.t` — the five-layer working set above, replacing the ten
     //     layers the original had on.
-    //   * `style=normal` (was `crt`, and its `sp=` params dropped). A recall is
-    //     a state swap the user asked for, but flipping the entire look to
-    //     retro green is not what "take me back to this place" should mean.
+    //   * `style=crt` retained. The CRT treatment is now the app's DEFAULT
+    //     (DEFAULT_STYLE in ui.js) because it reads like a CCTV monitor, so a
+    //     recall no longer changes the look out from under the operator — it
+    //     lands on what the session already had.
     hash: 'v=2&lat=37.7738&lon=-122.4232&alt=100&heading=180&pitch=-22&roll=360'
-      + '&style=normal&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1'
+      + '&style=crt&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1'
       + '&dm=DENSE&dd=75&da=elastic&kf=7&ko=1&cr=0&sc=1&scf=11&map=photoreal'
       + '&l=b.c.i.r.t&lo=f.e.1'
       + '&ui=c.c.1_c.p.0_l.c.1_l.p.0_d.c.0_v.c.0_r.c.1_s.c.1_g.c.0_p.c.0_m.c.0',

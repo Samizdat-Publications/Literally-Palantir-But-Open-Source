@@ -14,6 +14,7 @@ import { ShareLinkManager } from './sharelink.js';
 import {
   DEFAULT_PLACE_SCOPE,
   MAX_NAME_LENGTH,
+  PLACE_SCOPES,
   MAX_PLACES,
   SAVED_PLACES_STORAGE_KEY,
   SAVED_PLACES_VERSION,
@@ -194,33 +195,32 @@ test('export and import round-trip, and import fails closed on a future version'
 
 // ── Scope ───────────────────────────────────────────────────────────────────
 
-test('a new place defaults to position-only, in the store AND in the markup', () => {
-  // Two places encode this default — the addPlace() parameter and the `selected`
-  // attribute on the <select> — and nothing else would notice them disagreeing.
-  // The visible symptom would be a bookmark that silently replays a whole layer
-  // set the user never asked it to carry.
-  assert.equal(DEFAULT_PLACE_SCOPE, 'camera');
-  assert.equal(
-    addPlace(emptyDocument(), { name: 'Unspecified', hash: FULL_HASH }).place.scope,
-    DEFAULT_PLACE_SCOPE,
-  );
-
+test('the default scope agrees between the store and the markup', () => {
+  // The default is encoded twice — the addPlace() parameter and the `selected`
+  // attribute on the <select> — and nothing links them at runtime. Deliberately
+  // asserts they MATCH rather than asserting a particular value, so changing
+  // the default stays a one-line edit instead of a test rewrite. The failure
+  // this catches is silent: a bookmark saved with a scope the user did not pick.
   const markup = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const select = markup.slice(
-    markup.indexOf('id="saved-places-scope"'),
-    markup.indexOf('</select>', markup.indexOf('id="saved-places-scope"')),
-  );
-  assert.ok(select, 'the saved-places scope select must exist');
+  const open = markup.indexOf('id="saved-places-scope"');
+  const select = markup.slice(open, markup.indexOf('</select>', open));
+  assert.ok(open >= 0, 'the saved-places scope select must exist');
   const selected = [...select.matchAll(/<option value="([a-z]+)"([^>]*)>/g)]
     .filter(([, , attrs]) => /\bselected\b/.test(attrs))
     .map(([, value]) => value);
   assert.deepEqual(selected, [DEFAULT_PLACE_SCOPE],
-    'exactly one option must be marked selected, and it must match DEFAULT_PLACE_SCOPE');
+    'exactly one option is selected, and it must equal DEFAULT_PLACE_SCOPE');
+  assert.ok(PLACE_SCOPES.includes(DEFAULT_PLACE_SCOPE));
 
-  // An explicit choice still wins over the default.
   assert.equal(
-    addPlace(emptyDocument(), { name: 'Explicit', hash: FULL_HASH, scope: 'full' }).place.scope,
-    'full',
+    addPlace(emptyDocument(), { name: 'Unspecified', hash: FULL_HASH }).place.scope,
+    DEFAULT_PLACE_SCOPE,
+  );
+  // An explicit choice always beats the default, whichever way it points.
+  const other = PLACE_SCOPES.find((x) => x !== DEFAULT_PLACE_SCOPE);
+  assert.equal(
+    addPlace(emptyDocument(), { name: 'Explicit', hash: FULL_HASH, scope: other }).place.scope,
+    other,
   );
 });
 
@@ -366,12 +366,14 @@ test('the SF seed enables exactly its working set and turns everything else off'
   }
 });
 
-test('the SF seed does not force a visual style change on recall', () => {
-  // A recall is a state swap the user asked for, but flipping the whole look to
-  // retro green is not what "take me back to this place" should mean.
+test('the SF seed carries the app default style, so a recall is not a jolt', () => {
+  // Earlier this asserted `normal`, on the theory that a recall should not
+  // change the look. That reasoning is obsolete now the CRT treatment IS the
+  // default (DEFAULT_STYLE in ui.js) — matching it is what keeps a recall from
+  // changing anything the operator did not ask it to.
   const manager = makeManager('');
   const sf = SAVED_PLACES_SEED.find((entry) => /SF Market Street/.test(entry.name));
-  assert.equal(manager.parseHashState(sf.hash).style, 'normal');
+  assert.equal(manager.parseHashState(sf.hash).style, 'retro');
 });
 
 test('seeding happens only when the key is absent, so deletions stay deleted', () => {

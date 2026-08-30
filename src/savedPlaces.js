@@ -46,21 +46,18 @@ export const PLACE_SCOPES = Object.freeze(['full', 'camera']);
 /**
  * Scope a NEW place gets unless the user says otherwise.
  *
- * `camera`, deliberately. A bookmark saved casually should not be able to drag
- * a whole layer set, visual style and panel layout onto whatever the user is
- * doing when they recall it half an hour later — the surprising direction is
- * the one that changes state they did not ask about. Opting up to `full` is one
- * click, and the SF seed does exactly that because enforcing a layer set is its
- * whole purpose.
+ * `full`: a bookmark normally means "put me back exactly here", and the seeded
+ * SF view depends on that to enforce its layer set. `camera` is the narrow
+ * opt-out for a place that should move the view and touch nothing else.
  *
  * The `<select>` in index.html marks the matching option `selected`; a test
- * pins the two together so they cannot drift.
+ * pins the two together so they cannot drift apart.
  *
- * NOT the same as `normalizePlace`'s fallback, which stays `full`: that one is
- * about READING an entry whose scope is missing, and such an entry can only
- * come from a hand-edited or imported file written under the older semantics.
+ * `normalizePlace`'s fallback is the same value but answers a different
+ * question — what to assume when READING an entry whose scope field is missing,
+ * which only happens with a hand-edited or imported file.
  */
-export const DEFAULT_PLACE_SCOPE = 'camera';
+export const DEFAULT_PLACE_SCOPE = 'full';
 
 /**
  * Params a `camera` place replays. Deliberately NOT everything positional —

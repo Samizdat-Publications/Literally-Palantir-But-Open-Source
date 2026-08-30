@@ -95,7 +95,9 @@ export class ShareLinkManager {
     this.viewer = viewer;
     this._onRestore = onRestore; // callback: ({ style, bloom, sharpen }) => void
     this._debounceTimer = null;
-    this._currentStyle = 'normal';
+    // Mirrors DEFAULT_STYLE in ui.js. This field is what a generated link
+    // reports, so it has to match what the session actually renders from boot.
+    this._currentStyle = 'retro';
     this._bloomEnabled = false;
     this._sharpenEnabled = false;
     this._bloomIntensity = BLOOM_INTENSITY_DEFAULT;
