@@ -20,8 +20,8 @@ is empty for most layers because they render into their own collections.
 
 | | |
 |---|---|
-| Node | **v24.13.1** — below the `engines` floor of 24.14.0. Runs; warns `EBADENGINE` |
-| npm | 11.8.0 |
+| Node | **v24.19.0** — upgraded from 24.13.1 during this session, now above the `engines` floor. No `EBADENGINE` |
+| npm | 11.17.0 (was 11.8.0) |
 | Git | clean on `main`, local == `origin/HEAD` (`8ad93ed`); all 6 PRs merged |
 | Line endings | `.gitattributes` present; `git ls-files --eol` reports `w/lf` — **checkout is correct** |
 | `npm test` | **2,624 pass, 0 fail** (~95 s), plus 1 + 13 in the Node-24 benchmark suites |
@@ -240,7 +240,11 @@ The proxy half of the spec (§1) is unaffected and still correct.
   a real id: it appears in the live model list, and the key returns 200 with 53
   models. But the id was never the problem — the token budget was. **Closed**,
   with the underlying bug fixed above.
-- **Open item #6 — Node 24.14+.** Confirmed still on 24.13.1.
+- **Open item #6 — Node 24.14+.** **Closed.** Upgraded to **24.19.0** via
+  `winget install OpenJS.NodeJS.LTS`. Chosen over the 26.x package on purpose:
+  staying inside major 24 means no native-module ABI change, so `puppeteer`
+  and `sharp` did not need rebuilding. Re-verified after the upgrade —
+  **2,648 pass, 0 fail**, and `npm` no longer warns `EBADENGINE`.
 
 ## Not yet verified
 

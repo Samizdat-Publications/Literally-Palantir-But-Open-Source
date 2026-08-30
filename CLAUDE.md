@@ -18,7 +18,7 @@ reasoning and for the AI provider split. `FORK-NOTES.md` records provenance.
 
 | | |
 |---|---|
-| **Node** | **24.14.x–24.x or 26.x.** Enforced by `package.json` `engines`. Node 22 and 25 are rejected; 24.13 installs but warns `EBADENGINE`. |
+| **Node** | **24.14.x–24.x or 26.x.** Enforced by `package.json` `engines`. Node 22 and 25 are rejected; 24.13 installs but warns `EBADENGINE`. The operator's machine runs **24.19.0** as of 2026-08-29 (`winget install OpenJS.NodeJS.LTS`). |
 | **Dev server** | `npm run dev -- --host localhost --port 4173` |
 | **Tests** | `npm test` — 2,601 unit tests, expect 0 failures. Takes ~90s. |
 | **Google key** | `GOOGLE_MAPS_API_KEY` is **required**. `src/main.js:85` throws deliberately without it — the app stops at the splash screen. |
