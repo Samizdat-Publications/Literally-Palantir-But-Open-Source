@@ -35,7 +35,7 @@ dependency choices, need breaking upgrades to resolve, and are expected — do n
   one-liners chained with `&&`; give one command per line, or PowerShell syntax.
 - Always bake the `cd` into every command block you hand over — the user has
   asked for this explicitly. Their project root is nested:
-  `C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source`
+  `C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source`
 - `Read-Host` **echoes** typed input unless given `-AsSecureString`. Use the
   secure form for anything secret.
 - To edit `.env`: `(Get-Content .env) -replace '^KEY=.*', "KEY=value" | Set-Content .env -Encoding UTF8`.

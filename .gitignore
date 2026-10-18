@@ -10,3 +10,7 @@ output/
 .DS_Store
 .gstack/
 3d-models/
+
+# Local-only: nested duplicate checkout and Claude Code local data
+/Literally-Palantir-But-Open-Source/
+.claude/

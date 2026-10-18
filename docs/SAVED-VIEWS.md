@@ -11,7 +11,7 @@ The app already serialises the whole view into the URL hash. To restore a view,
 paste the **hash** onto whatever host the dev server is on:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 ```
 
 Then open `http://localhost:4173/` + the `#...` string from the entry below.

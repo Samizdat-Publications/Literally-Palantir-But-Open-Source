@@ -130,7 +130,7 @@ a running server changes nothing.
 To confirm what the corruption actually is, if it recurs:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 $t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
 "length: $($t.Length)  dots: $(([char[]]$t | Where-Object {$_ -eq '.'}).Count)"
 "unprintable: $(([char[]]$t | Where-Object {[int]$_ -lt 33 -or [int]$_ -gt 126}).Count)"
@@ -144,7 +144,7 @@ PowerShell unless given `-AsSecureString`, and a plain `-replace` silently
 does nothing when the line is absent. This round-trips correctly:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 $sec = Read-Host "Paste the Cesium ion token" -AsSecureString
 $val = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
   [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
@@ -167,7 +167,7 @@ encrypted, and this reveals scopes, expiry and issuer without sending the token
 anywhere:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 $t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
 "segments: $($t.Split('.').Count)   last4: $($t.Substring($t.Length-4))"
 $p = $t.Split('.')[1].Replace('-','+').Replace('_','/')
@@ -188,7 +188,7 @@ verified live on 2026-08-28: a bogus token returns `401` from `/v1/me`, and
 endpoint.
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 $t = (Get-Content .env | Select-String '^CESIUM_ION_TOKEN=').ToString().Split('=',2)[1].Trim()
 "token length: $($t.Length)"
 $t.Substring(0,6)
@@ -239,7 +239,7 @@ future checkout is CRLF anyway.
 applies on checkout. To re-normalize a clean tree:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 git pull origin main
 git rm --cached -r . -q
 git reset --hard
@@ -278,7 +278,7 @@ query logic. Making it smarter is not a provider swap.
 
 - **Operator is on Windows, PowerShell 5.1.** No `&&` chaining. Bake `cd` into
   every command block — they asked for this explicitly. Project root is nested:
-  `C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source`
+  `C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source`
 - `Read-Host` **echoes** input unless given `-AsSecureString`.
 - **Node floor is 24.14.** The operator is on 24.13.1 — runs, warns `EBADENGINE`.
 - `npm install` prints 9 high-severity audit warnings. Upstream's dependency

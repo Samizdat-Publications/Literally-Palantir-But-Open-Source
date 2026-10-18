@@ -1,4 +1,4 @@
-# Setup — what you need to provide
+# Setup: what you need to provide
 
 This is the operator's checklist for standing up God's Eye View. The
 [README](README.md) explains *what the app does*; this file covers *what you have to
@@ -38,13 +38,13 @@ npm run dev -- --host localhost --port 4173
 
 Open <http://localhost:4173>.
 
-Without `GOOGLE_MAPS_API_KEY` the app **stops at the splash screen** — `src/main.js`
+Without `GOOGLE_MAPS_API_KEY` the app **stops at the splash screen**: `src/main.js`
 throws deliberately rather than booting a globe with no planet on it. Every other key
 is optional and only lights up one more layer.
 
 ---
 
-## 3. Google Maps — the one required key
+## 3. Google Maps: the one required key
 
 Get it at **<https://console.cloud.google.com/>** → *APIs & Services → Credentials →
 Create credentials → API key*. You need a project with **billing enabled**; Maps
@@ -58,7 +58,7 @@ bad key. Enable all four under *APIs & Services → Library*:
 
 | API | What breaks without it |
 |---|---|
-| **Map Tiles API** | Nothing loads — the photorealistic 3D planet itself. **Required.** |
+| **Map Tiles API** | Nothing loads: the photorealistic 3D planet itself. **Required.** |
 | **Geocoding API** | Search box, "fly me to X" by name, and voice place lookups all fail (`src/locations.js`, `src/voice/gevActions.js`, `src/annotations/annotationResolver.js`). |
 | **Places API (New)** | The nearby-places and text-search panels return empty (`/api/google/nearby-places`, `/api/google/text-search`). |
 | **Street View Static API** | CCTV cameras lose their fallback still frames when a municipal feed is down (`/api/cctv/frame`). |
@@ -76,7 +76,7 @@ Hiding it is not the control; scoping it is:
 
 ## 4. Optional keys, in the order they are worth getting
 
-Every one of these is genuinely optional — the app runs without all of them.
+Every one of these is genuinely optional: the app runs without all of them.
 
 | Key | Unlocks | Cost | Where |
 |---|---|---|---|
@@ -93,7 +93,7 @@ Notes worth knowing before you sign up for any of them:
 
 - **OpenAI** is the only optional key that costs real money in normal use. Realtime
   audio is billed per minute of conversation. The app shows a live session estimate,
-  warns at $2, and hard-caps a session at $5 — but set a provider-side usage limit
+  warns at $2, and hard-caps a session at $5, but set a provider-side usage limit
   under *Settings → Limits* as the actual backstop.
 - **TomTom, OpenSky, Launch Library 2, and TfL** all degrade gracefully. Traffic falls
   back to a simulation, aircraft fall back to anonymous polling, launches and London
@@ -101,7 +101,7 @@ Notes worth knowing before you sign up for any of them:
 - **OpenSky** defaults to `OPENSKY_AUTH_MODE=oauth`, but with no credentials set it
   still serves anonymous aircraft. Verified: a keyless `/api/opensky` request returned
   1.8 MB of live traffic. Set `OPENSKY_AUTH_MODE=anon` to skip the auth attempt.
-- **Cesium ion** should be a public `assets:read` token — it reaches the browser too.
+- **Cesium ion** should be a public `assets:read` token; it reaches the browser too.
 
 ---
 
@@ -131,7 +131,7 @@ npm run dev -- --host localhost --port 4173
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:4173/   # expect 200
 ```
 
-Endpoints for keys you have not set return **503** by design — that is the proxy
+Endpoints for keys you have not set return **503** by design; that is the proxy
 declining to call upstream, not a failure. `/api/firms`, `/api/ais-live`, and
 `/api/realtime/token` all behave this way until their key is present.
 

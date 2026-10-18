@@ -1,7 +1,7 @@
 # Fork notes
 
-This repository is a copy of an upstream open-source project, brought in so it can be
-worked on privately. Everything outside this file is upstream's work unless a later
+This repository is a copy of an upstream open-source project, imported as its own
+repository rather than a GitHub fork. Everything outside this file, README.md and SETUP.md is upstream's work unless a later
 commit says otherwise.
 
 ## Provenance
@@ -43,7 +43,7 @@ them (Google Maps, OpenSky) restrict commercial use.
 
 ## Contributing back upstream
 
-A private mirror cannot open a pull request against upstream. GitHub only allows that
+A copied repository cannot open a pull request against upstream. GitHub only allows that
 from a real fork. To send work back:
 
 1. Fork `bilawalsidhu/gods-eye-view` on GitHub through the normal Fork button.

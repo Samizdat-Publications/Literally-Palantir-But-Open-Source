@@ -32,7 +32,7 @@ Run these and report what you find. Do not start the work queue until you know
 where you stand.
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 git status
 git log --oneline -3
 git branch --show-current
@@ -44,7 +44,7 @@ Then check GitHub reachability — the operator has a PAT configured, but confir
 rather than assume, and confirm push works before you need it:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 git remote -v
 git ls-remote origin HEAD
 gh auth status
@@ -71,7 +71,7 @@ operator's working tree re-normalized**, because until then you cannot trust
 any test result on their machine:
 
 ```powershell
-cd C:\Users\stewa\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
+cd C:\Users\stewa\Documents\Claude\Literally-Palantir-But-Open-Source\Literally-Palantir-But-Open-Source
 git checkout main
 git pull origin main
 git rm --cached -r . -q
