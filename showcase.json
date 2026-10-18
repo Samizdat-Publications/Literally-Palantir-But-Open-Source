@@ -1,13 +1,18 @@
 {
   "name": "KEYHOLE",
   "repo": "Literally-Palantir-But-Open-Source",
-  "pitch": "A fork of Bilawal Sidhu's God's Eye View, the live 3D globe of public signals, gaining UFO and paranormal correlation layers.",
+  "pitch": "An open-source global surveillance dashboard, forked from Bilawal Sidhu's God's Eye View, gaining UFO and paranormal layers.",
   "status": "in-development",
   "version": "0.1.0",
   "kind": "tool",
   "started": "2026-08-26",
-  "updated": "2026-08-24",
-  "tech": ["JavaScript", "CesiumJS", "Google 3D Tiles", "OpenAI Realtime"],
+  "updated": "2026-10-18",
+  "tech": [
+    "JavaScript",
+    "CesiumJS",
+    "Google 3D Tiles",
+    "OpenAI Realtime"
+  ],
   "fork": {
     "upstream": "https://github.com/bilawalsidhu/gods-eye-view",
     "upstream_name": "God's Eye View",
@@ -15,7 +20,7 @@
     "licence": "MIT"
   },
   "links": {
-    "landing": "",
+    "landing": "https://keyhole-41l.pages.dev",
     "play": "",
     "devlog": "",
     "upstream": "https://github.com/bilawalsidhu/gods-eye-view",
@@ -23,15 +28,44 @@
   },
   "hero": {
     "gif": "docs/media/hero-open-source-reveal.gif",
-    "poster": "",
-    "clip": ""
+    "poster": "site/media/hero.jpg",
+    "clip": "site/media/hero.mp4"
   },
   "credits": [
-    { "what": "God's Eye View: all application code, design and documentation (upstream)", "who": "Bilawal Sidhu (github.com/bilawalsidhu/gods-eye-view)", "licence": "MIT" },
-    { "what": "README capture GIFs and PNGs in docs/media/", "who": "Bilawal Sidhu", "licence": "Not MIT; redistributed with the repository by permission, see docs/media/README.md" },
-    { "what": "3D models in public/models/", "who": "Individual authors", "licence": "Per model, see public/models/README.md" },
-    { "what": "Bundled datasets and live feeds", "who": "TeleGeography, OpenStreetMap contributors, NASA FIRMS and others", "licence": "Per source, see DATA_SOURCES.md" },
-    { "what": "Planned UFO, paranormal and confounder layers", "who": "Compiled in Strange Signals from NUFORC, BFRO, Shadowlands, OurAirports, NASA, USGS", "licence": "Per source" },
-    { "what": "KEYHOLE changes: branding, panels, tours, provider wiring, setup guide, fork notes, planned correlation layers", "who": "Stewart Gregerson", "licence": "MIT" }
+    {
+      "what": "God's Eye View: all application code, design and documentation (upstream)",
+      "who": "Bilawal Sidhu (github.com/bilawalsidhu/gods-eye-view)",
+      "licence": "MIT"
+    },
+    {
+      "what": "README capture GIFs and PNGs in docs/media/",
+      "who": "Bilawal Sidhu",
+      "licence": "Not MIT; redistributed with the repository by permission, see docs/media/README.md"
+    },
+    {
+      "what": "3D models in public/models/",
+      "who": "Individual authors",
+      "licence": "Per model, see public/models/README.md"
+    },
+    {
+      "what": "Bundled datasets and live feeds",
+      "who": "TeleGeography, OpenStreetMap contributors, NASA FIRMS and others",
+      "licence": "Per source, see DATA_SOURCES.md"
+    },
+    {
+      "what": "Planned UFO, paranormal and confounder layers",
+      "who": "Compiled in Strange Signals from NUFORC, BFRO, Shadowlands, OurAirports, NASA, USGS",
+      "licence": "Per source"
+    },
+    {
+      "what": "KEYHOLE changes: branding, panels, tours, provider wiring, setup guide, fork notes, planned correlation layers",
+      "who": "Stewart Gregerson",
+      "licence": "MIT"
+    },
+    {
+      "what": "Landing page captures in site/media/",
+      "who": "Stewart Gregerson (scripted Playwright capture of a local run)",
+      "licence": "Screen captures; the map imagery and data shown stay under their providers terms, see DATA_SOURCES.md"
+    }
   ]
 }

@@ -6,6 +6,8 @@ KEYHOLE, a fork of Bilawal Sidhu's God's Eye View, the live 3D globe of public s
 
 <sub>Repository name: Literally Palantir But Open Source.</sub>
 
+**[Landing page](https://keyhole-41l.pages.dev)** (clips captured from a local run) · **[Run it yourself](SETUP.md)**
+
 > [!IMPORTANT]
 > **This is a fork.** Nearly everything here is the work of **[Bilawal Sidhu](https://github.com/bilawalsidhu)**, who created **[God's Eye View](https://github.com/bilawalsidhu/gods-eye-view)** and released it as open source under the MIT License in August 2026.
 >

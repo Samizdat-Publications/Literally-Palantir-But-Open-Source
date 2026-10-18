@@ -14,3 +14,6 @@ output/
 # Local-only: nested duplicate checkout and Claude Code local data
 /Literally-Palantir-But-Open-Source/
 .claude/
+
+# Landing page build output
+site-dist/

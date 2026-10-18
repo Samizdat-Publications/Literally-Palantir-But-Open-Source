@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KEYHOLE: an open-source global surveillance dashboard</title>
+<meta name="description" content="KEYHOLE is an open-source global surveillance dashboard: a live 3D globe of public signals, forked from Bilawal Sidhu's God's Eye View, gaining UFO and paranormal layers. In development.">
+<meta name="theme-color" content="#04070a">
+<meta property="og:title" content="KEYHOLE">
+<meta property="og:description" content="An open-source global surveillance dashboard, forked from Bilawal Sidhu's God's Eye View, gaining UFO and paranormal layers.">
+<meta property="og:image" content="media/og.jpg">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2304070a'/%3E%3Ccircle cx='16' cy='12' r='6' fill='none' stroke='%2300d4ff' stroke-width='2.5'/%3E%3Cpath d='M13 17 L11 27 H21 L19 17' fill='%2300d4ff'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<a class="skip" href="#feeds">Skip to the feeds</a>
+
+<header class="bar">
+  <a class="bar-mark" href="#top" aria-label="KEYHOLE, back to the top"><span class="bar-hole" aria-hidden="true"></span>KEYHOLE</a>
+  <nav class="bar-links" aria-label="Sections">
+    <a href="#agent">Agent</a>
+    <a href="#cockpit">Cockpit</a>
+    <a href="#cities">Cities</a>
+    <a href="#streets">Streets</a>
+    <a href="#orbit">Orbit</a>
+    <a href="#next">Next</a>
+    <a href="#making">How it was made</a>
+  </nav>
+  <a class="btn btn-small" href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source">Source</a>
+</header>
+
+<main>
+
+<section class="hero" id="top" aria-labelledby="hero-title">
+  <video class="hero-video" id="hero-video" muted loop playsinline autoplay preload="auto" poster="media/hero.jpg" aria-label="Four cuts from the dashboard: live London traffic and street cameras in the CRT look, Midtown Manhattan in noir, a cockpit ride over Tokyo Bay, and satellites over Asia.">
+    <source src="media/hero.mp4" type="video/mp4">
+  </video>
+  <div class="hero-shade"></div>
+  <div class="hud-corners" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+  <p class="hud-rec" aria-hidden="true"><span class="rec-dot"></span>REC // PUBLIC SIGNALS ONLY</p>
+  <div class="hero-text">
+    <p class="pill"><span class="pill-dot"></span>In development: v0.1.0</p>
+    <h1 id="hero-title" class="wordmark">KEYHOLE</h1>
+    <p class="tagline">An open-source global surveillance dashboard, forked from Bilawal Sidhu's God's Eye View, gaining UFO and paranormal layers.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source">Source on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/blob/main/SETUP.md">Run it yourself</a>
+    </div>
+    <p class="hero-note">No public build: it runs on your machine with your own API keys. One Google Maps key gets you in; every other key is optional.</p>
+  </div>
+</section>
+
+<section class="fork" aria-labelledby="fork-title">
+  <div class="fork-card">
+    <p class="label">PROVENANCE // READ THIS FIRST</p>
+    <h2 id="fork-title">A fork of <a href="https://github.com/bilawalsidhu/gods-eye-view">God's Eye View</a></h2>
+    <p>Nearly everything you see on this page is the work of <a href="https://github.com/bilawalsidhu"><b>Bilawal Sidhu</b></a>, who built God's Eye View and released it as open source under the MIT License in August 2026. KEYHOLE was imported from his upstream commit <code>880a672</code> (24 August 2026) with its full history, so <code>git log</code> and <code>git blame</code> still credit him for his code.</p>
+    <p>If you want God's Eye View itself, the latest features, or to contribute, go to <a href="https://github.com/bilawalsidhu/gods-eye-view">the original repository</a> (homepage <a href="https://maptheworld.ai/">maptheworld.ai</a>). It is far more active than this fork. KEYHOLE is not affiliated with or endorsed by Bilawal Sidhu, and it has no connection to Palantir Technologies: the repository name is a joke about the kind of tool this is.</p>
+  </div>
+</section>
+
+<section class="intro" id="feeds" aria-labelledby="intro-title">
+  <h2 id="intro-title">The whole planet, live, in a browser tab</h2>
+  <p>A photorealistic 3D globe (CesiumJS on Google Photorealistic 3D Tiles) carrying the world's public signals: aircraft from ADS-B, ships from AIS, satellites propagated from current orbital elements, earthquakes, wildfires, street traffic, radio stations and public city cameras projected into the scene. Every layer keeps its source and freshness visible, and anything modeled rather than live is labelled as such.</p>
+  <p>Every clip below was captured from a local run of this repository, mostly by its own scripted scene tours. Nothing was composited in.</p>
+</section>
+
+<section class="feature" id="agent" aria-labelledby="agent-title">
+  <div class="feature-text">
+    <p class="layer">FEED 01 // REALTIME AGENT</p>
+    <h2 id="agent-title">Tell it where to look</h2>
+    <p>An OpenAI Realtime agent drives the map through the same actions as the interface: camera moves, layers, sensor styles, tracking, annotations. You normally talk to it; here two lines were typed to it instead.</p>
+    <ol class="transcript">
+      <li><span>&gt;</span> "Take me to Tokyo and orbit slowly." It flew from the globe to Tokyo Tower and started a slow orbit.</li>
+      <li><span>&gt;</span> "Switch to night vision." It picked the thermal (FLIR) look instead. Honest footage.</li>
+    </ol>
+  </div>
+  <figure class="screen">
+    <span class="screen-tag">CAM 01 // TOKYO</span>
+    <video data-inview muted loop playsinline preload="none" poster="media/agent.jpg" aria-label="The globe swings to Japan and settles on Tokyo Tower, orbits slowly, then switches to a black-and-white thermal look inside a circular scope.">
+      <source src="media/agent.mp4" type="video/mp4">
+    </video>
+    <figcaption>The orbit is trimmed in the middle; the agent's own response time is left in.</figcaption>
+  </figure>
+</section>
+
+<section class="feature flip" id="cockpit" aria-labelledby="cockpit-title">
+  <div class="feature-text">
+    <p class="layer">FEED 02 // FIRST PERSON</p>
+    <h2 id="cockpit-title">Ride along with a live flight</h2>
+    <p>Pick any tracked aircraft and enter its cockpit: ground speed, altitude and heading on a visor HUD, nearby flights and AIS ships labelled in the scene, and a contact panel counting what is around you.</p>
+    <p>Here: the nearest live flight to Haneda, climbing out over Tokyo Bay, then the same view through the thermal sensor.</p>
+  </div>
+  <figure class="screen">
+    <span class="screen-tag">CAM 02 // TOKYO BAY</span>
+    <video data-inview muted loop playsinline preload="none" poster="media/cockpit.jpg" aria-label="A cockpit view over Tokyo Bay with a speed and altitude HUD and labelled ships below, switching to a thermal scope view.">
+      <source src="media/cockpit.mp4" type="video/mp4">
+    </video>
+  </figure>
+</section>
+
+<section class="feature" id="cities" aria-labelledby="cities-title">
+  <div class="feature-text">
+    <p class="layer">FEED 03 // 3D TILES</p>
+    <h2 id="cities-title">Every city, in 3D</h2>
+    <p>The planet is Google's photorealistic mesh, streamed live. KEYHOLE adds scripted landmark tours for London, New York, California and Ohio that fly the skyline with a single live layer on, so the mesh gets the frame rate.</p>
+    <p>This is the London Landmarks tour in the noir look, through the circular scope the project is named for.</p>
+  </div>
+  <figure class="screen">
+    <span class="screen-tag">CAM 03 // LONDON</span>
+    <video data-inview muted loop playsinline preload="none" poster="media/city.jpg" aria-label="A black-and-white flight over London's Thames, Westminster and the South Bank inside a circular keyhole mask.">
+      <source src="media/city.mp4" type="video/mp4">
+    </video>
+  </figure>
+</section>
+
+<section class="feature flip" id="streets" aria-labelledby="streets-title">
+  <div class="feature-text">
+    <p class="layer">FEED 04 // STREET LEVEL</p>
+    <h2 id="streets-title">Live streets</h2>
+    <p>Traffic flow from TomTom (or a built-in simulation without a key), and public traffic cameras from Austin, Caltrans and Transport for London. London is the one network that publishes video, and KEYHOLE turns it on: TfL's rolling clip plays beside every still.</p>
+    <p>This is the London street cameras tour in the CRT look, with camera positions and congestion along the Thames.</p>
+  </div>
+  <figure class="screen">
+    <span class="screen-tag">CAM 04 // THAMES</span>
+    <video data-inview muted loop playsinline preload="none" poster="media/live.jpg" aria-label="A CRT-filtered aerial view of the Thames in London with camera labels and green traffic-flow lines appearing over the roads.">
+      <source src="media/live.mp4" type="video/mp4">
+    </video>
+  </figure>
+</section>
+
+<section class="feature" id="orbit" aria-labelledby="orbit-title">
+  <div class="feature-text">
+    <p class="layer">FEED 05 // ORBITAL SHELL</p>
+    <h2 id="orbit-title">Pull back to orbit</h2>
+    <p>Satellites are propagated in the browser from CelesTrak's current orbital elements, every frame. Flights come from OpenSky, military aircraft from adsb.lol, quakes from USGS.</p>
+    <p>This is upstream's Omniscience Pullback tour: from Japan out to the globe with the satellite catalogue overhead.</p>
+  </div>
+  <figure class="screen">
+    <span class="screen-tag">CAM 05 // ASIA</span>
+    <video data-inview muted loop playsinline preload="none" poster="media/orbit.jpg" aria-label="The camera pulls back from Japan to a wide view of Asia, with satellite labels and orbit tracks above the horizon.">
+      <source src="media/orbit.mp4" type="video/mp4">
+    </video>
+  </figure>
+</section>
+
+<section class="stills" aria-labelledby="stills-title">
+  <h2 id="stills-title">Stills</h2>
+  <div class="grid">
+    <figure><img src="media/still-tokyo.jpg" width="1280" height="720" loading="lazy" alt="Tokyo Tower in full colour from above, in the default look, after the agent flew there."><figcaption>Tokyo Tower, flown to by the agent</figcaption></figure>
+    <figure><img src="media/still-cockpit.jpg" width="1280" height="720" loading="lazy" alt="The cockpit HUD of a live flight over Tokyo Bay, with labelled ships and nearby flights."><figcaption>Cockpit view, live flight out of Haneda</figcaption></figure>
+    <figure><img src="media/still-midtown.jpg" width="1280" height="720" loading="lazy" alt="Midtown Manhattan in the noir look, from the New York Landmarks tour."><figcaption>Midtown Manhattan, noir look</figcaption></figure>
+    <figure><img src="media/still-london-cctv.jpg" width="1280" height="720" loading="lazy" alt="The Thames in the CRT look with TfL camera labels and traffic-flow lines."><figcaption>London cameras and traffic, CRT look</figcaption></figure>
+    <figure><img src="media/still-liberty.jpg" width="1280" height="720" loading="lazy" alt="The Statue of Liberty on Liberty Island, photorealistic 3D tiles in the default look."><figcaption>Liberty Island, default look</figcaption></figure>
+    <figure><img src="media/still-keyhole.jpg" width="1280" height="720" loading="lazy" alt="London's South Bank in black and white inside the circular keyhole scope."><figcaption>The keyhole scope over London</figcaption></figure>
+  </div>
+</section>
+
+<section class="next" id="next" aria-labelledby="next-title">
+  <div class="dossier">
+    <p class="label">ROADMAP // NOT BUILT YET</p>
+    <h2 id="next-title">Next: the strange layers</h2>
+    <p>The reason this fork exists is to bring the datasets from <a href="https://github.com/Samizdat-Publications/strange-signals">Strange Signals</a>, my UAP correlation project (<a href="https://strange-signals.stewartgregerson.workers.dev/">live map</a>), onto this globe. <b>None of these layers has landed yet.</b> What is planned:</p>
+    <ul class="plan">
+      <li><b>UFO / UAP sightings:</b> about 372,000 geocoded reports, from NUFORC through several cleaned datasets plus the Larry Hatch *U* historical catalogue.</li>
+      <li><b>Paranormal hotspots:</b> about 8,800 haunted places and 4,200 Bigfoot reports, with population-corrected scoring so dense cities do not win by default.</li>
+      <li><b>Confounders:</b> airports, military and DOE sites, restricted airspace, NASA fireballs, earthquakes and geomagnetic storms, the things a sighting should be checked against first.</li>
+      <li><b>Correlation views:</b> report density against those confounders, on the 3D globe instead of a flat map.</li>
+    </ul>
+    <p>A cluster over a city is population bias. A cluster over empty terrain next to restricted airspace is worth a look. Layers model events, places and infrastructure, never named individuals.</p>
+  </div>
+</section>
+
+<section class="changes" aria-labelledby="changes-title">
+  <h2 id="changes-title">What KEYHOLE has changed so far</h2>
+  <p>On top of upstream, already on <code>main</code>:</p>
+  <ul class="ticks">
+    <li>The KEYHOLE name, with every runtime string in one file that still credits God's Eye View.</li>
+    <li>Draggable panels. Upstream's drag code was complete but no panel had a handle in the markup.</li>
+    <li>Gemini for the HUD scene summary, with OpenAI as the fallback.</li>
+    <li>Live London TfL camera video, and 13 scripted demo tours (landmarks, radio, California cameras and more).</li>
+    <li>The voice agent can shed the heavy static layers when you say it is laggy.</li>
+    <li>Readable Cesium ion 401/403 errors, LF line endings forced so the test suite passes on Windows, and an operator setup guide.</li>
+  </ul>
+</section>
+
+<section class="making" id="making" aria-labelledby="making-title">
+  <h2 id="making-title">How it was made</h2>
+  <div class="cols">
+    <div>
+      <h3>Upstream</h3>
+      <p>Vanilla JavaScript, <a href="https://cesium.com/platform/cesiumjs/">CesiumJS</a> and <a href="https://vite.dev/">Vite</a>, no front-end framework. Google Photorealistic 3D Tiles for the planet, the OpenAI Realtime API for voice. Keys for paid providers are brokered by the local dev server so they stay on your machine, and paid feeds sit behind cached, budget-governed proxies. The analyst that answers questions like "how many flights are over Texas" is local query code, not a language model.</p>
+    </div>
+    <div>
+      <h3>This fork</h3>
+      <p>The correlation layers will follow upstream's one-module-per-layer pattern, fed by the Strange Signals build scripts, so upstream changes can still be merged cleanly. Every new data source gets registered in both the data-sources file and the in-app attribution list.</p>
+    </div>
+    <div>
+      <h3>These clips</h3>
+      <p>Captured at 1920x1080 by a Playwright script against a local run: the page clock is paused and stepped 1/30 s per frame, so the globe streams its tiles between frames and nothing stutters. The tours are the repository's own scene recipes. The agent clip used two typed queries to the cheaper Realtime model: about two cents on the app's own cost meter.</p>
+    </div>
+  </div>
+  <p class="run">Requirements: Node.js 24.14 or later in the 24 line (or 26), and a Google Maps API key with the Map Tiles API enabled; Geocoding, Places (New) and Street View Static light up search, nearby places and camera fallbacks. <a href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/blob/main/SETUP.md">SETUP.md</a> lists every optional key and what visibly breaks without it.</p>
+</section>
+
+<section class="credits" id="credits" aria-labelledby="credits-title">
+  <h2 id="credits-title">Credits and data sources</h2>
+  <p>The code is MIT. The data is not: every source keeps its own licence and terms. Full breakdown in <a href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/blob/main/DATA_SOURCES.md">DATA_SOURCES.md</a>.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th scope="col">What</th><th scope="col">Who</th><th scope="col">Licence / terms</th></tr></thead>
+    <tbody>
+      <tr><td>God's Eye View: all application code, design and documentation</td><td><a href="https://github.com/bilawalsidhu/gods-eye-view">Bilawal Sidhu</a></td><td>MIT</td></tr>
+      <tr><td>KEYHOLE changes</td><td>Stewart Gregerson</td><td>MIT</td></tr>
+      <tr><td>The clips and stills on this page</td><td>Captured by Stewart Gregerson from a local run</td><td>The map imagery and data shown in them stay under the providers' terms below</td></tr>
+      <tr><td>Photorealistic 3D Tiles, geocoding, places</td><td>Google Maps Platform</td><td>Google Maps Platform terms, your own key</td></tr>
+      <tr><td>CesiumJS; ion World Imagery and World Terrain</td><td>Cesium</td><td>Apache 2.0 (CesiumJS); Cesium ion terms</td></tr>
+      <tr><td>Live flights</td><td>OpenSky Network (Schäfer et al., "Bringing Up OpenSky", IPSN 2014)</td><td>Non-commercial research and education licence</td></tr>
+      <tr><td>Military flights, traces, flight fallback</td><td>adsb.lol contributors</td><td>ODbL 1.0</td></tr>
+      <tr><td>Ships (AIS)</td><td>AISStream.io</td><td>Free beta, courtesy credit</td></tr>
+      <tr><td>Satellite orbital elements</td><td>CelesTrak (celestrak.org), Dr. T.S. Kelso</td><td>US-government-origin data, citation requested</td></tr>
+      <tr><td>Launches and missions</td><td>Launch Library 2, The Space Devs</td><td>The Space Devs terms of use</td></tr>
+      <tr><td>Earthquakes</td><td>U.S. Geological Survey</td><td>U.S. public domain</td></tr>
+      <tr><td>Active fires</td><td>NASA FIRMS, part of NASA's EOSDIS</td><td>CC0 / U.S. public domain, citation requested</td></tr>
+      <tr><td>Traffic flow</td><td>TomTom</td><td>TomTom developer terms, your own key</td></tr>
+      <tr><td>Roads, installations, place labels (Overpass, Nominatim)</td><td>© OpenStreetMap contributors</td><td>ODbL 1.0</td></tr>
+      <tr><td>Cockpit weather</td><td>Open-Meteo.com</td><td>CC BY 4.0</td></tr>
+      <tr><td>Cockpit headlines</td><td>Google News RSS; GDELT Project</td><td>Google News terms (personal, non-commercial); GDELT terms with citation</td></tr>
+      <tr><td>Austin cameras</td><td>City of Austin, data.austintexas.gov</td><td>City of Austin Open Data terms</td></tr>
+      <tr><td>California cameras</td><td>Caltrans, cwwp2.dot.ca.gov</td><td>Public Caltrans camera data, courtesy credit</td></tr>
+      <tr><td>London cameras (JamCams)</td><td>Powered by TfL Open Data. Contains OS data © Crown copyright and database rights</td><td>TfL Open Data terms, attribution required</td></tr>
+      <tr><td>Bikeshare</td><td>GBFS feeds (Lyft, BCycle) and each operator</td><td>Per feed, attribution</td></tr>
+      <tr><td>Radio station directory</td><td>Radio Browser</td><td>PDDL 1.0; broadcasters' own stream terms</td></tr>
+      <tr><td>Terrain and heights</td><td>Re:Earth Terrain / Mapterhorn; EGM2008 (NGA)</td><td>CC BY 4.0; public domain</td></tr>
+      <tr><td>Datacenters and dams (bundled)</td><td>© OpenStreetMap contributors, Open Infrastructure Map</td><td>ODbL 1.0</td></tr>
+      <tr><td>Submarine cables (bundled)</td><td>© TeleGeography, submarinecablemap.com</td><td>CC BY-NC-SA 3.0, non-commercial only</td></tr>
+      <tr><td>Natural regions (bundled)</td><td>Made with Natural Earth</td><td>Public domain</td></tr>
+      <tr><td>San Francisco neighborhoods (bundled)</td><td>City and County of San Francisco, DataSF</td><td>PDDL 1.0</td></tr>
+      <tr><td>3D aircraft and other models</td><td>Individual authors</td><td>Per model, see <a href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/blob/main/public/models/README.md">public/models/README.md</a></td></tr>
+      <tr><td>Voice agent and HUD summaries (services, not data)</td><td>OpenAI Realtime API; Google Gemini</td><td>Provider terms, your own keys</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="small">We acknowledge the use of data and imagery from NASA's Fire Information for Resource Management System (FIRMS), part of NASA's Earth Observing System Data and Information System (EOSDIS).</p>
+</section>
+
+</main>
+
+<footer class="foot">
+  <p>KEYHOLE is a fork of <a href="https://github.com/bilawalsidhu/gods-eye-view">God's Eye View</a> by Bilawal Sidhu. Code MIT: Copyright (c) 2026 Bilawal Sidhu; fork changes Copyright (c) 2026 Stewart Gregerson, same licence.</p>
+  <p>An exploratory visualisation of public and third-party data that may be delayed, incomplete, modeled or wrong. Do not use it for navigation, emergency response or anything safety-critical.</p>
+  <p><a href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source">Source on GitHub</a> · <a href="https://github.com/Samizdat-Publications/Literally-Palantir-But-Open-Source/blob/main/SETUP.md">Run it yourself</a> · <a href="https://github.com/Samizdat-Publications">Samizdat Publications</a></p>
+</footer>
+
+<script src="site.js" defer></script>
+</body>
+</html>
