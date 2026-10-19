@@ -1,5 +1,29 @@
 # Weather radar layer — build spec
 
+> ## ⚠️ Correction 2026-08-29 — read before building
+>
+> Two claims below were tested against the running app and did not survive.
+>
+> **1. The rendering approach in §2 does not work on the default basemap.**
+> "Render as a Cesium `ImageryLayer` over the globe" draws **nothing** in
+> photoreal mode: Google's 3D tileset replaces the globe
+> (`_activatePhotoreal()` sets `scene.globe.show = false`), and an
+> `ImageryLayer` has no surface to draw on. Measured: **0** radar tile requests
+> on `photoreal`, **61 × HTTP 200** on the `osm` globe stack. Making radar
+> visible in photoreal mode needs **geometry, not imagery**. This is probably
+> why upstream pulled its radar overlay for "unreliable visible value"
+> (`docs/KNOWN-ISSUES.md`). §1 (the proxy) is unaffected.
+>
+> **2. RainViewer never returns 404.** A bogus frame path returns **HTTP 200**
+> with a valid 1085-byte PNG, and out-of-range `z/x/y` also returns **200**. So
+> the "expired/404" error model does not exist, and a stale path renders a
+> plausible-but-wrong image instead of failing. Our proxy must therefore reject
+> bad coordinates itself, and the UI should surface the frame timestamp.
+> Relatedly, paths expire far more slowly than warned: a path captured
+> 2026-08-28 still resolved a day later.
+>
+> Evidence: [`VERIFIED-STATE.md`](VERIFIED-STATE.md).
+
 Requested and approved. Not built. Everything below was verified live against
 the real API on 2026-08-28, so the shapes and URLs are observed, not guessed.
 
@@ -83,10 +107,52 @@ which is also tile-based).
 - Add it to `REGISTERED_LAYER_IDS` in **`src/demoTours.test.mjs`** and to
   `REGISTERED` in **`src/scenes/scenePolicy.test.mjs`**, or every existing tour
   fails the "declares every layer" assertion.
-- Render as a Cesium `ImageryLayer` over the globe, alpha ~0.6 so terrain reads
-  through.
 - Animation: step the frame index on a timer across `radar.past`. Ship it
   paused-on-latest by default; a 13-frame loop pulling tiles is not free.
+- **Surface the frame timestamp in the UI.** Not cosmetic: RainViewer answers
+  200 for a stale or bogus path (see the correction at the top), so a visible
+  timestamp is the ONLY signal that the radar being shown is old.
+
+#### Rendering — rewritten 2026-08-29
+
+~~Render as a Cesium `ImageryLayer` over the globe, alpha ~0.6 so terrain reads
+through.~~ Measured against the running app: **0 tile requests on the default
+basemap.** `_activatePhotoreal()` sets `scene.globe.show = false` because
+Google's 3D tileset replaces the globe, and an `ImageryLayer` draws only on the
+globe surface. It fails silently — the layer reports `show: true` and draws
+nothing.
+
+Two honest options. Pick before starting; they are different sizes.
+
+**A. Imagery, 2D basemaps only (small).** Keep `ImageryLayer`. Radar works on
+`bing-aerial`, `bing-labels` and `osm`, and is absent on `photoreal`. Verified
+working: 61 tiles, all 200, legible over Puget Sound. The layer MUST then say
+so in its UI state — an unexplained empty toggle is what "unreliable visible
+value" meant. This is close to what upstream shipped and then pulled.
+
+**B. Geometry at echo altitude (larger, and the one worth doing).** Render each
+radar tile as a translucent textured primitive placed at altitude ABOVE the
+mesh, rather than draped on a globe that is not there. Primitives render
+alongside the 3D tileset, so this works in photoreal mode — the app's default
+and its whole aesthetic — and it is physically truthful, since precipitation
+really is above the ground.
+
+Sketch, not yet built:
+
+- Build a `Cesium.Primitive` per visible tile from a `RectangleGeometry` on the
+  tile's WGS84 bounds, at a fixed height (start ~4 km; radar echo tops vary, and
+  a single sheet is an honest approximation to label as such).
+- Material: the tile PNG via `Cesium.Material.fromType('Image')`, translucent.
+- Drive the visible tile set from the camera, reusing the slippy-tile maths the
+  TomTom path already has rather than writing a second tiler.
+- Watch primitive count. `docs/LAYER-COST.md` is the yardstick, and this layer
+  rebuilds geometry every frame step — cap the tile count and the zoom range.
+- `src/cockpitCloudEffects.js` is NOT the model: it is a full-screen shader
+  pass, which is why it survives photoreal mode, but it is not geospatially
+  placed and cannot show *where* the rain is.
+
+Option B has no prototype yet. Prove one tile renders over photoreal terrain
+before building the rest — that single screenshot is the whole risk.
 
 ### 3. Attribution — **mandatory, both places**
 

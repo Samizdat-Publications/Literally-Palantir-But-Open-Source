@@ -2,8 +2,10 @@ import * as Cesium from 'cesium';
 import { viewportBias, placesNearViewRecovery } from './annotations/annotationResolver.js';
 
 /**
- * Points of Interest per city.
- * Each city has 5 POIs; the first is the default fly-to landmark.
+ * Points of Interest per bucket.
+ * City buckets carry 5 POIs; the global Wonders and Nature buckets carry more.
+ * The first entry is the default fly-to landmark. POI_HOTKEYS in ui.js binds
+ * the first eight to keys; beyond that a numeric badge is shown instead.
  *
  * Field reference:
  *   alt     — RANGE (distance from target in meters), NOT absolute altitude
@@ -115,6 +117,116 @@ export const CITY_POIS = {
       { name: 'Lincoln Memorial', lat: 38.8893, lon: -77.0502, alt: 400, pitch: -25, heading: 90, buildingHeight: 20 },
       { name: 'Pentagon', lat: 38.8711, lon: -77.0559, alt: 800, pitch: -40, heading: 0, buildingHeight: 20 },
       { name: 'Jefferson Memorial', lat: 38.8814, lon: -77.0365, alt: 400, pitch: -30, heading: 0, buildingHeight: 25 },
+    ],
+  },
+
+  // ── Global buckets ──────────────────────────────────────────────────────
+  //
+  // Unlike the city buckets above, these span the planet, so:
+  //
+  //   * no `viewBounds` — an "overview" of a global set is meaningless, and
+  //     flyToPresetLocation already falls through to the first POI without it;
+  //   * `groundElevation` is per-POI rather than per-bucket. That field is the
+  //     FALLBACK terrain height, and with Google 3D Tiles the globe carries no
+  //     terrain (`globe.getHeight` returns null), so the fallback is what every
+  //     first fly-to actually uses. One bucket-wide number cannot serve both a
+  //     sea-level bay and a 3,000 m alpine summit.
+  //
+  // Every entry below was verified by flying to it and looking at the result;
+  // candidates that Google's photorealistic coverage cannot carry were cut
+  // rather than shipped. See docs/DESTINATIONS.md for what was rejected and why.
+
+  wonders: {
+    name: 'Wonders',
+    groundElevation: 0,
+    pois: [
+      // GSD 0.10 m at this framing — the sharpest site in the set. The
+      // hypogeum floor is legible inside the arena.
+      { name: 'Colosseum', lat: 41.8902, lon: 12.4924, alt: 380, pitch: -35, heading: 300, buildingHeight: 24, groundElevation: 20 },
+      // GSD 0.11 m. El Castillo centre-frame with the Temple of the Warriors.
+      { name: 'Chichén Itzá', lat: 20.6829, lon: -88.5686, alt: 500, pitch: -28, heading: 45, buildingHeight: 24, groundElevation: 30 },
+      { name: 'Great Pyramid of Giza', lat: 29.9792, lon: 31.1342, alt: 900, pitch: -25, heading: 135, buildingHeight: 70, groundElevation: 60 },
+      { name: 'Taj Mahal', lat: 27.1751, lon: 78.0421, alt: 600, pitch: -25, heading: 0, buildingHeight: 35, groundElevation: 170 },
+      // Tuned by trial: at range 700 the flight settled on Sugarloaf and the
+      // geocoder read back "Heliponto Morro Urca" — the right vista, the wrong
+      // subject. 420 m at a shallow -12 deg puts the statue itself on the
+      // Corcovado summit with Rio and the Atlantic behind it, and the readout
+      // now confirms "Christ the Redeemer, Estrada do Corcovado".
+      { name: 'Christ the Redeemer', lat: -22.9519, lon: -43.2105, alt: 420, pitch: -12, heading: 110, buildingHeight: 20, groundElevation: 700 },
+    ],
+  },
+
+  nature: {
+    name: 'Nature',
+    groundElevation: 0,
+    pois: [
+      { name: 'Grand Canyon', lat: 36.0616, lon: -112.1077, alt: 4200, pitch: -18, heading: 250, buildingHeight: 0, groundElevation: 2100 },
+      // GSD 0.22 m. Horseshoe Falls sits centre-frame with the whole cataract.
+      { name: 'Niagara Falls', lat: 43.0790, lon: -79.0750, alt: 900, pitch: -25, heading: 315, buildingHeight: 0, groundElevation: 170 },
+      { name: 'Matterhorn', lat: 45.9763, lon: 7.6586, alt: 5000, pitch: -10, heading: 45, buildingHeight: 0, groundElevation: 3000 },
+      { name: 'Uluru', lat: -25.3444, lon: 131.0369, alt: 2600, pitch: -22, heading: 45, buildingHeight: 0, groundElevation: 860 },
+      { name: 'Grand Prismatic Spring', lat: 44.5251, lon: -110.8382, alt: 1200, pitch: -35, heading: 0, buildingHeight: 0, groundElevation: 2200 },
+      { name: 'Iguazú Falls', lat: -25.6867, lon: -54.4450, alt: 1500, pitch: -22, heading: 225, buildingHeight: 0, groundElevation: 170 },
+      { name: 'Yosemite Valley', lat: 37.7156, lon: -119.6773, alt: 6500, pitch: -8, heading: 70, buildingHeight: 0, groundElevation: 1300 },
+    ],
+  },
+
+  // US Army posts. All three carry good photogrammetry — these are ordinary
+  // public installations that appear on every commercial map, and the app
+  // already surfaces OSM-mapped installations as a data layer.
+  //
+  // Coordinates came from the Google Geocoding API rather than memory, after a
+  // hand-guessed Airborne School position landed ~2 km off in base housing.
+  // Worth knowing: "Sicily Drop Zone, Fort Bragg" geocodes to Fort Bragg,
+  // CALIFORNIA — the town — so anything here needs its state spelled out.
+  bases: {
+    name: 'Bases',
+    groundElevation: 0,
+    pois: [
+      { name: 'Fort Bragg — Pope Field', lat: 35.1714, lon: -79.0173, alt: 1400, pitch: -28, heading: 90, buildingHeight: 10, groundElevation: 70 },
+      { name: 'Fort Bragg — Main Post', lat: 35.1394, lon: -79.0052, alt: 1800, pitch: -25, heading: 135, buildingHeight: 10, groundElevation: 75 },
+      // The 250 ft free-fall towers stand around the circular landing field.
+      { name: 'Fort Benning — Airborne School', lat: 32.3543, lon: -84.9720, alt: 1100, pitch: -25, heading: 70, buildingHeight: 20, groundElevation: 100 },
+      { name: 'Fort Benning — Main Post', lat: 32.3531, lon: -84.9552, alt: 2200, pitch: -25, heading: 315, buildingHeight: 10, groundElevation: 100 },
+      // The historic Old Post quadrangle, stone buildings and the artillery park.
+      { name: 'Fort Sill — Old Post', lat: 34.6707, lon: -98.3865, alt: 900, pitch: -28, heading: 200, buildingHeight: 15, groundElevation: 360 },
+      { name: 'Fort Sill — Main Post', lat: 34.6497, lon: -98.4226, alt: 2600, pitch: -22, heading: 45, buildingHeight: 10, groundElevation: 360 },
+    ],
+  },
+
+  /**
+   * Conflict theatres — camera positions for the open-source feeds this app
+   * carries. Pair with the "Conflict watch" saved place, which turns on the
+   * layer set; a bucket only moves the camera.
+   *
+   * Ranges are ~130-190 km on purpose. Measured 2026-08-30: the vessel layer
+   * draws nothing above roughly 200 km, so the continental framings that felt
+   * natural for a "war map" showed empty terrain and read as a broken app.
+   *
+   * READ docs/CONFLICT-VIEW.md BEFORE ADDING ENTRIES. What these feeds can and
+   * cannot show is not obvious, and two theatres people ask for first — the
+   * Strait of Hormuz and Bab el-Mandeb — currently have ZERO vessels in the
+   * AISStream feed, because it is crowd-sourced from shore receivers and those
+   * waters have none. They are kept below as terrain views, honestly labelled,
+   * rather than dropped: the chokepoint itself is worth seeing, and coverage
+   * can change.
+   */
+  conflict: {
+    name: 'Conflict',
+    groundElevation: 0,
+    pois: [
+      // 296 vessels in-box at capture — the best-covered theatre of these.
+      { name: 'E. Mediterranean — Levant', lat: 33.6, lon: 34.3, alt: 150000, pitch: -35, heading: 285, buildingHeight: 0, groundElevation: 0 },
+      // 62 vessels — the Odesa grain-corridor approaches.
+      { name: 'Black Sea — Odesa approaches', lat: 46.0, lon: 30.9, alt: 150000, pitch: -35, heading: 180, buildingHeight: 0, groundElevation: 0 },
+      // Ukraine's airspace is closed, so the civil-traffic VOID is the signal.
+      // Framed wide enough to hold the ring of European traffic around it,
+      // otherwise the absence just looks like a layer that failed to load.
+      { name: 'Ukraine — closed airspace', lat: 48.5, lon: 31.5, alt: 620000, pitch: -50, heading: 0, buildingHeight: 0, groundElevation: 0 },
+      // Terrain only: no AIS coverage here at present. See the doc.
+      { name: 'Strait of Hormuz', lat: 26.6, lon: 56.35, alt: 130000, pitch: -35, heading: 45, buildingHeight: 0, groundElevation: 0 },
+      { name: 'Bab el-Mandeb', lat: 12.6, lon: 43.35, alt: 130000, pitch: -35, heading: 0, buildingHeight: 0, groundElevation: 0 },
+      { name: 'Suez Canal', lat: 30.1, lon: 32.55, alt: 140000, pitch: -40, heading: 0, buildingHeight: 0, groundElevation: 0 },
     ],
   },
 };
@@ -280,7 +392,9 @@ export function flyToPresetLocation(viewer, locationId, options = {}) {
     heading: poi.heading || 0,
     buildingHeight: poi.buildingHeight || 30,
     buildingBounds: poi.buildingBounds || null,
-    groundElevation: city.groundElevation || 0,
+    // Per-POI wins: the global buckets span sea level to alpine summits, and
+    // this is the fallback the FIRST fly-to always uses under Google 3D Tiles.
+    groundElevation: poi.groundElevation ?? city.groundElevation ?? 0,
     ...options,
   });
 }
@@ -299,7 +413,7 @@ export function flyToPOI(viewer, cityId, poiIndex, options = {}) {
     heading: poi.heading || 0,
     buildingHeight: poi.buildingHeight || 30,
     buildingBounds: poi.buildingBounds || null,
-    groundElevation: city.groundElevation || 0,
+    groundElevation: poi.groundElevation ?? city.groundElevation ?? 0,
     ...options,
   });
 }

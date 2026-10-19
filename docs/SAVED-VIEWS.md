@@ -30,12 +30,12 @@ string works if the app is ever served from anywhere else.
 
 ## 1. SF Market Street — low approach
 
-Saved 2026-08-28. The first one.
+Saved 2026-08-28. The first one. **Narrowed 2026-08-29** — see the note at the foot.
 
 **Hash:**
 
 ```
-#v=2&lat=37.7738&lon=-122.4232&alt=100&heading=180&pitch=-22&roll=360&style=crt&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1&dm=DENSE&dd=75&da=elastic&kf=7&ko=1&cr=0&sc=1&scf=11&map=photoreal&l=a.c.e.q.d.w.i.r.u.t&lo=f.e.1&ui=c.c.1_c.p.0_l.c.1_l.p.0_d.c.0_v.c.0_r.c.1_s.c.1_g.c.0_p.c.0_m.c.0&sp=p.100_d.0_i.42
+#v=2&lat=37.7738&lon=-122.4232&alt=100&heading=180&pitch=-22&roll=360&style=normal&bloom=0&sharpen=1&bi=0&bv=2&si=49&hud=tactical&hv=1&dm=DENSE&dd=75&da=elastic&kf=7&ko=1&cr=0&sc=1&scf=11&map=photoreal&l=b.c.i.r.t&lo=f.e.1&ui=c.c.1_c.p.0_l.c.1_l.p.0_d.c.0_v.c.0_r.c.1_s.c.1_g.c.0_p.c.0_m.c.0
 ```
 
 **What it restores** (decoded against `src/sharelink.js` and
@@ -46,18 +46,34 @@ Saved 2026-08-28. The first one.
 | **Position** | 37.7738 N, 122.4232 W — San Francisco, the Market Street corridor near Guerrero/Duboce |
 | **Camera** | 100 m altitude, heading 180° (due south), pitch −22°, roll 360° (≡ 0) |
 | **Basemap** | `photoreal` — Google Photorealistic 3D Tiles |
-| **Style** | `crt` (retro) — bloom **off**, sharpen on at 49; CRT params pixelation 100, distortion 0, instability 42 |
+| **Style** | `normal` — bloom **off**, sharpen on at 49 |
 | **HUD** | `tactical`, visible |
 | **Detection** | `DENSE`, density 75, elastic allocation, fade 7, outside-opacity 1 |
 | **Scope mask** | on, feather 11 |
-| **Layers on (10)** | AIS vessels, CCTV, earthquakes, dams, datacenters, FIRMS fires, military installations, radio, submarine cables, traffic |
-| **Layers off** | flights, military aircraft, satellites, rocket launches, bikeshare, military awareness |
+| **Layers on (5)** | street traffic, CCTV, radio, bikeshare, mapped installations |
+| **Layers off** | everything else — AIS vessels, earthquakes, dams, datacenters, FIRMS fires, flights, military aircraft, satellites, rocket launches, submarine cables, military awareness |
 | **Panels** | control + location + radio + scene expanded; data, CCTV, global context, post-process toggles, param sliders collapsed; nothing pinned |
 
-**Note on the ten layers.** That is nearly everything the app has, all live at
-once, over the most expensive mesh in North America. It is almost certainly the
-main reason the app felt heavy. Killing flights was the right first move — the
-next cheapest wins are submarine cables and dams, which are static reference
-geometry and are not telling you anything at 100 m altitude. The hash above is
-preserved exactly as captured; tune in the browser and save a second entry
-rather than editing this one.
+**Narrowed to a five-layer working set, 2026-08-29.** As originally captured
+this view turned **ten** layers on at once over the most expensive mesh in
+North America — almost certainly the main reason the app felt heavy. Three of
+them (datacenters 4,362, submarine cables 2,629, dams 716) are ~7,700 entities
+of static reference geometry that never update and show **nothing** at 100 m
+altitude.
+
+It now carries exactly: **street traffic, CCTV, radio, bikeshare, mapped
+installations**, with everything else explicitly off. `style` also relaxed from
+`crt` to `normal`: a recall is a state swap the user asked for, but flipping the
+whole look to retro green is not what "take me back to this place" should mean.
+
+**On mapped installations.** Measured at this exact view, it returns **0**. It
+is viewport-scoped (10° maximum box) and there is nothing tagged military inside
+a 100 m frame on Market Street. It yields **1** at city zoom (~6 km) and **12**
+across the Bay Area (~40 km). It is kept on because it costs nothing here and
+populates when you pull back — but do not expect to see it at this altitude.
+
+**This file is the seed source.** `src/data/savedPlacesSeed.js` imports from it,
+and `savedPlaces.test.mjs` asserts the hash decodes to exactly the five layers
+named above. Edit here, mirror there, and bump `SAVED_PLACES_SEED_VERSION` so
+existing browsers pick the change up — otherwise anyone who already loaded the
+app keeps the old copy forever.

@@ -95,7 +95,9 @@ export class ShareLinkManager {
     this.viewer = viewer;
     this._onRestore = onRestore; // callback: ({ style, bloom, sharpen }) => void
     this._debounceTimer = null;
-    this._currentStyle = 'normal';
+    // Mirrors DEFAULT_STYLE in ui.js. This field is what a generated link
+    // reports, so it has to match what the session actually renders from boot.
+    this._currentStyle = 'retro';
     this._bloomEnabled = false;
     this._sharpenEnabled = false;
     this._bloomIntensity = BLOOM_INTENSITY_DEFAULT;
@@ -134,6 +136,12 @@ export class ShareLinkManager {
     };
     this._destroyed = false;
     this._restoreGeneration = 0;
+    // Monotonic id per restore FLIGHT. Boot used to be the only one, so
+    // `completeInitialRestore()` could just clear the flag. Saved-place recall
+    // makes restores re-entrant: a stale flight settling late must not release
+    // the hash guard that a newer flight is relying on, so each flight carries
+    // its id and only the newest one may clear.
+    this._restoreSessionId = 0;
     this._activeCameraFlight = null;
     this._isNavigationCurrent = typeof isNavigationCurrent === 'function'
       ? isNavigationCurrent
@@ -154,8 +162,59 @@ export class ShareLinkManager {
   parseInitialHash() {
     const hash = window.location.hash.slice(1);
     if (!hash) return null;
+    const state = this._stateFromParams(new URLSearchParams(hash));
+    if (!state) return null;
+    // Hold URL writes until the complete incoming state has been restored.
+    state.restoreSessionId = this._beginRestoreSession();
+    return state;
+  }
 
-    const params = new URLSearchParams(hash);
+  /**
+   * Decode any hash string or params into restorable state WITHOUT touching the
+   * restore guards.
+   *
+   * Split out of `parseInitialHash()` so a saved place can reuse the exact same
+   * decoder the share link uses. Writing a second decoder would drift from this
+   * one the first time a param was added, and every param here has already been
+   * through its validation.
+   * @param {string|URLSearchParams} hashOrParams
+   * @returns {object|null}
+   */
+  parseHashState(hashOrParams) {
+    const params = hashOrParams instanceof URLSearchParams
+      ? hashOrParams
+      : new URLSearchParams(String(hashOrParams ?? '').replace(/^#/, ''));
+    return this._stateFromParams(params);
+  }
+
+  /** Snapshot the lane counters as they stand right now. */
+  _snapshotRestoreAuthority() {
+    return {
+      visual: this._restoreAuthority.visual,
+      map: this._restoreAuthority.map,
+      panels: new Map(this._restoreAuthority.panels),
+    };
+  }
+
+  /**
+   * Open a restore flight: suppress hash writes, drop any pending debounce, and
+   * take an id.
+   *
+   * Cancelling the debounce matters — the manager writes the hash on a 500 ms
+   * `history.replaceState`, so a queued write from the user's last camera move
+   * would otherwise land mid-recall and overwrite the address with the view
+   * they are navigating AWAY from.
+   * @returns {number}
+   */
+  _beginRestoreSession() {
+    this._restoreSessionId += 1;
+    this._initialRestorePending = true;
+    clearTimeout(this._debounceTimer);
+    this._debounceTimer = null;
+    return this._restoreSessionId;
+  }
+
+  _stateFromParams(params) {
     const lat = parseFloat(params.get('lat'));
     const lon = parseFloat(params.get('lon'));
 
@@ -232,21 +291,23 @@ export class ShareLinkManager {
       panelState: decodePanelStateParams(params),
       sharedAtMs: decodeShareCreatedAtMs(params),
     };
-    state.restoreAuthority = {
-      visual: this._restoreAuthority.visual,
-      map: this._restoreAuthority.map,
-      panels: new Map(this._restoreAuthority.panels),
-    };
-
-    // Hold URL writes until the complete incoming state has been restored.
-    this._initialRestorePending = true;
+    // Snapshot taken at DECODE time on purpose. `applyState` compares it against
+    // the live counters, so only a claim landing between decode and apply — a
+    // user acting during the flight — can veto a lane. Claims from before the
+    // decode are already reflected here and cannot veto, which is what makes an
+    // explicit recall outrank whatever the user touched ten minutes ago.
+    state.restoreAuthority = this._snapshotRestoreAuthority();
     return state;
   }
 
   /**
    * Apply a parsed state to the viewer + style manager.
    */
-  async applyState(state, { applyCamera = true, navigationToken = null } = {}) {
+  async applyState(state, {
+    applyCamera = true,
+    navigationToken = null,
+    visualScope = 'full',
+  } = {}) {
     if (this._destroyed || !state) return { succeeded: false, reason: 'unavailable' };
     const view = {
       destination: Cesium.Cartesian3.fromDegrees(state.lon, state.lat, state.alt),
@@ -293,9 +354,15 @@ export class ShareLinkManager {
 
     // Notify the style manager via callback
     const reserved = state.restoreAuthority || null;
-    const visualCurrent = !reserved || reserved.visual === this._restoreAuthority.visual;
+    // A `camera` place replays position and basemap only. Everything else is
+    // suppressed by reusing the EXISTING contract that an undefined field means
+    // "leave it alone" — the same mechanism a superseded lane already uses — so
+    // no new skip path is introduced into the restore callback.
+    const cameraOnly = visualScope === 'camera';
+    const visualCurrent = !cameraOnly
+      && (!reserved || reserved.visual === this._restoreAuthority.visual);
     const mapCurrent = !reserved || reserved.map === this._restoreAuthority.map;
-    let panelState = state.panelState;
+    let panelState = cameraOnly ? null : state.panelState;
     if (reserved && panelState?.specs) {
       panelState = {
         specs: panelState.specs.filter((spec) => (
@@ -336,12 +403,24 @@ export class ShareLinkManager {
       camera: camera.status,
       visual: visualCurrent ? restoreStatus : 'superseded',
       map: mapCurrent ? restoreStatus : 'superseded',
-      panels: panelState ? restoreStatus : (state.panelState ? 'superseded' : 'skipped'),
+      panels: panelState
+        ? restoreStatus
+        : (cameraOnly ? 'skipped' : (state.panelState ? 'superseded' : 'skipped')),
     };
   }
 
-  /** Release initial hash suppression only after every restore owner settles. */
-  completeInitialRestore() {
+  /**
+   * Release hash suppression once a restore flight's owners have settled.
+   *
+   * Pass the `restoreSessionId` the flight was opened with. A stale flight
+   * settling after a newer one started is ignored, so a slow boot restore
+   * cannot un-suppress the hash in the middle of a saved-place recall. Called
+   * with no id it clears unconditionally, preserving the original boot
+   * behaviour for callers that predate sessions.
+   * @param {number|null} [sessionId]
+   */
+  completeInitialRestore(sessionId = null) {
+    if (sessionId != null && sessionId !== this._restoreSessionId) return;
     if (!this._initialRestorePending) return;
     this._initialRestorePending = false;
     this._scheduleUpdate();
@@ -521,6 +600,65 @@ export class ShareLinkManager {
     // fresh timestamp to its ephemeral URL without aging the live address.
     params.delete(SHARE_CREATED_AT_PARAM);
     return params;
+  }
+
+  /**
+   * Public: the current view as a hash string, no leading '#'.
+   *
+   * Thin promotion of `_buildHashParams()`, whose docstring already calls it "a
+   * deterministic snapshot without mutating history" — precisely what a
+   * bookmark needs. Saved places stores this string verbatim.
+   * @returns {string|null}
+   */
+  captureViewState() {
+    const params = this._buildHashParams();
+    return params ? params.toString() : null;
+  }
+
+  /**
+   * Public: replay a stored view mid-session.
+   *
+   * Recall is not boot. The user has been interacting for ten minutes and now
+   * wants a state swap, which breaks three assumptions the boot path makes:
+   *
+   *   1. A queued 500 ms hash write is probably in flight and would overwrite
+   *      the address with the view being navigated away from. `_beginRestoreSession()`
+   *      cancels it.
+   *   2. The restore guard was designed to be released exactly once. It is now
+   *      session-scoped so a late boot flight cannot release a recall's guard.
+   *   3. Lane claims must not veto an EXPLICIT request. Decoding takes a fresh
+   *      authority snapshot, so only a claim made during this flight can win —
+   *      which is the behaviour that should survive, since a user acting mid-recall
+   *      really does outrank it.
+   *
+   * Deliberately NOT implemented by assigning `location.hash`: that races the
+   * debounce and re-enters through the boot path, which is the bug this avoids.
+   *
+   * @param {string|URLSearchParams} hashOrParams
+   * @param {{scope?:'full'|'camera', applyCamera?:boolean, navigationToken?:number|null}} [options]
+   * @returns {Promise<{succeeded:boolean, reason?:string}>}
+   */
+  async restoreViewState(hashOrParams, {
+    scope = 'full',
+    applyCamera = true,
+    navigationToken = null,
+  } = {}) {
+    if (this._destroyed) return { succeeded: false, reason: 'destroyed' };
+    const state = this.parseHashState(hashOrParams);
+    if (!state) return { succeeded: false, reason: 'undecodable' };
+    const sessionId = this._beginRestoreSession();
+    try {
+      const result = await this.applyState(state, {
+        applyCamera,
+        navigationToken,
+        visualScope: scope === 'camera' ? 'camera' : 'full',
+      });
+      return { ...result, sessionId };
+    } finally {
+      // Always release, including on a throw — an escaping error must not leave
+      // the address bar frozen for the rest of the session.
+      this.completeInitialRestore(sessionId);
+    }
   }
 
   /** Cancel owned work and release listeners without disturbing newer navigation. */

@@ -605,6 +605,39 @@ export class LayerStateCoordinator {
     return this._source;
   }
 
+  /**
+   * Apply a decoded layer state mid-session — the re-entrant counterpart to
+   * `start()`.
+   *
+   * `start()` is boot-only: it picks a SOURCE (share vs. local vs. legacy), and
+   * calling it twice would relitigate that choice and reset `restorePromise`,
+   * which boot callers are still awaiting. A saved-place recall has no such
+   * question to answer — the state is right there, and the user explicitly
+   * asked for it — so this sets the durable state and replays it through the
+   * same `_restoreSelectedState` path boot uses.
+   *
+   * Origin stays `share-restore` because that is the same semantic: an incoming
+   * serialised state, not a per-layer user toggle. Using an explicit origin
+   * would make each layer look individually user-owned and change how later
+   * changes are attributed.
+   *
+   * @param {object|null} layerState - Decoded layer state, as `parseHashState` returns.
+   * @param {{origin?:string}} [options]
+   * @returns {Promise<Array>} per-layer restore results, empty when there is nothing to do
+   */
+  async applyLayerState(layerState, { origin = LAYER_RESTORE_ORIGINS.share } = {}) {
+    if (this._destroyed) return [];
+    const normalized = layerState ? normalizeLayerState(layerState) : null;
+    if (!normalized) return [];
+    // Abort any restore still in flight before repointing the durable state,
+    // so a slower earlier recall cannot land on top of this one.
+    this.cancelPendingRestores('superseded-by-view-recall');
+    this._durableState = normalized;
+    this.shareLinkManager?.onLayerStateChange?.();
+    this._notifyDurableState();
+    return this._restoreSelectedState(origin);
+  }
+
   getDurableState() {
     return cloneLayerState(this._durableState);
   }
