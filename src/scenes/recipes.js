@@ -996,7 +996,11 @@ const PUBLIC_SCENE_RECIPES = [
 
 /** Build the recipe list without mutating stored user-authored projects. */
 function createSceneRecipes({ localDemoRecipes = EVENT_RECIPES } = {}) {
-  return [...localDemoRecipes, ...PUBLIC_SCENE_RECIPES, ...KEYHOLE_TOUR_RECIPES];
+  return [
+    ...localDemoRecipes,
+    ...PUBLIC_SCENE_RECIPES,
+    ...KEYHOLE_TOUR_RECIPES,
+  ];
 }
 
 export const SCENE_RECIPES = createSceneRecipes();
