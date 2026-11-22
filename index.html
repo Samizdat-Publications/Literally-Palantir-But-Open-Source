@@ -569,6 +569,45 @@
             <input type="text" id="location-search" placeholder="Search any location..." autocomplete="off" spellcheck="false" />
           </div>
         </div>
+        <!--
+          Saved places. Deliberately a SECTION of the location tray rather than a
+          panel of its own: a new panel would need registering in
+          DRAGGABLE_PANEL_IDS with a matching .panel-drag-handle, plus
+          SHARE_PANEL_STATE_REGISTRY and SHARE_PANEL_STATE_SPECS, each guarded by
+          a test. location-bar is dock-anchored and intentionally not draggable,
+          so living inside it needs none of that.
+        -->
+        <div class="saved-places" id="saved-places">
+          <div class="saved-places-head">
+            <span class="saved-places-title">SAVED PLACES</span>
+            <button type="button" id="saved-places-save" class="saved-places-btn saved-places-btn-primary" title="Save the current view as a bookmark">+ SAVE VIEW</button>
+          </div>
+          <form class="saved-places-form" id="saved-places-form" hidden>
+            <input type="text" id="saved-places-name" class="saved-places-input" placeholder="Name this view..." autocomplete="off" spellcheck="false" maxlength="80" />
+            <!--
+              Default is "Everything": a bookmark is normally meant to bring
+              back the whole setup, which is what the seeded SF view relies on.
+              "Position only" is the narrow opt-out. DEFAULT_PLACE_SCOPE in
+              savedPlaces.js mirrors whichever option is marked selected here,
+              and a test pins the two together.
+            -->
+            <select id="saved-places-scope" class="saved-places-select" title="What this bookmark replays">
+              <option value="full" selected>Everything</option>
+              <option value="camera">Position only</option>
+            </select>
+            <button type="submit" class="saved-places-btn saved-places-btn-primary">SAVE</button>
+            <button type="button" id="saved-places-cancel" class="saved-places-btn">CANCEL</button>
+          </form>
+          <div id="saved-places-list" class="saved-places-list" role="list"></div>
+          <div class="saved-places-foot">
+            <span id="saved-places-status" class="saved-places-status" aria-live="polite"></span>
+            <span class="saved-places-foot-actions">
+              <button type="button" id="saved-places-export" class="saved-places-btn" title="Download all saved places as a file">EXPORT</button>
+              <button type="button" id="saved-places-import" class="saved-places-btn" title="Load saved places from a file">IMPORT</button>
+            </span>
+          </div>
+          <input type="file" id="saved-places-file" accept="application/json,.json" hidden />
+        </div>
       </div>
     </div>
   </div>

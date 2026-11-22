@@ -22,6 +22,17 @@ import {
 import { IntelHUD } from './hud.js';
 import { ShareLinkManager } from './sharelink.js';
 import {
+  addPlace,
+  applyScopeToHash,
+  exportDocument,
+  findPlace,
+  importDocument,
+  removePlace,
+  syncSeed,
+  writeStore,
+} from './savedPlaces.js';
+import { SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION } from './data/savedPlacesSeed.js';
+import {
   isExplicitLayerStateOrigin,
   LayerStateCoordinator,
 } from './data/layerState.js';
@@ -201,6 +212,32 @@ const TRANSITION_DURATION_MS = 500;
 const STYLES = { retro: retroShader, surveillance: nightVisionShader, thermal: thermalShader, anime: animeShader, noir: noirShader, snow: snowShader };
 /** Versioned localStorage namespace prefix to invalidate stale panel layouts. */
 const PANEL_LAYOUT_STORAGE_VERSION = 'v6';
+
+/**
+ * Hotkeys for the POI row, in display order — the keyboard's top row.
+ *
+ * Eight, not the original five: the global Wonders and Nature buckets carry
+ * more entries than a city does. Beyond this list `_expandPOIRow` falls back to
+ * a numeric badge, so a longer bucket still renders, it just loses its hotkey.
+ * Y, U and I were free — the only other single-key binding in the app is `c`
+ * for the cockpit.
+ */
+const POI_HOTKEYS = Object.freeze(['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I']);
+
+/**
+ * Style the app opens in — hotkey 2, the CRT/retro treatment.
+ *
+ * Chosen because it reads like a CCTV monitor, which is the whole point of the
+ * console; hotkey 1 (`normal`) is the unfiltered globe and stays one keypress
+ * away. Applied at boot rather than assigned to `activeStyle` directly:
+ * `setStyle()` early-returns when the requested style already matches, so
+ * pre-setting the field would leave the label saying RETRO with no shader
+ * actually composited.
+ *
+ * A share link or saved place carries its own style, and that must win — this
+ * is only the default for a session that arrives with nothing to restore.
+ */
+const DEFAULT_STYLE = 'retro';
 const SHARE_PANEL_STATE_SPECS = Object.freeze([
   { id: 'control-panel', pinnable: true },
   { id: 'location-bar', pinnable: true },
@@ -2390,6 +2427,13 @@ export class StyleManager {
     this._locationPills = document.getElementById('location-pills');
     this._poiRow = document.getElementById('poi-row');
     this._locationBarDivider = document.getElementById('location-bar-divider');
+    this._savedPlacesList = document.getElementById('saved-places-list');
+    this._savedPlacesForm = document.getElementById('saved-places-form');
+    this._savedPlacesName = document.getElementById('saved-places-name');
+    this._savedPlacesScope = document.getElementById('saved-places-scope');
+    this._savedPlacesStatusEl = document.getElementById('saved-places-status');
+    this._savedPlacesFile = document.getElementById('saved-places-file');
+    this._savedPlacesDocument = { v: 1, places: [] };
     this._styleMiniValue = document.getElementById('style-mini-value');
     this._locationMiniCity = document.getElementById('location-mini-city');
     this._locationMiniPoi = document.getElementById('location-mini-poi');
@@ -2643,12 +2687,18 @@ export class StyleManager {
     this._initCctvPanel();
     this._initGlobalContextPanel();
     this._initLocationBar();
+    this._initSavedPlaces();
     this._initShareButton();
     this._initClearSelectedLayersButton();
     this._initResetGlobeButton();
     this._initHUDToggle();
     this._initModels3dToggle();
     this._applyGlobalPostDefaults();
+    // Only when nothing is being restored: an incoming share/saved view owns
+    // the style, and stomping it here would silently discard what the link said.
+    if (!this._initialShareState) {
+      this.setStyle(DEFAULT_STYLE, { revealParameters: false, restore: true });
+    }
     this._initOrbit();
     this._initRecordingOverlay();
     this._startAnimationLoop();
@@ -2691,10 +2741,13 @@ export class StyleManager {
                     { clearSelection: true },
                   ) === true,
                 };
-            this.shareLinkManager.completeInitialRestore();
+            // Pass the flight's session id: a saved-place recall started while
+            // this delayed boot restore was still in the air owns the guard now,
+            // and this settling must not release it out from under them.
+            this.shareLinkManager.completeInitialRestore(savedState?.restoreSessionId ?? null);
             this._settleInitialShareRestore({ status: 'settled', share, layers, tracking });
           } catch (error) {
-            this.shareLinkManager.completeInitialRestore();
+            this.shareLinkManager.completeInitialRestore(savedState?.restoreSessionId ?? null);
             this._settleInitialShareRestore({
               status: 'failed',
               error: String(error?.message || error),
@@ -9313,8 +9366,261 @@ export class StyleManager {
    * and geocoding search input.
    * @returns {void}
    */
+  /**
+   * Saved places: bookmark the serialised view and replay it mid-session.
+   *
+   * Lives inside the location tray rather than in a panel of its own, so it
+   * needs no entry in DRAGGABLE_PANEL_IDS, SHARE_PANEL_STATE_REGISTRY or
+   * SHARE_PANEL_STATE_SPECS — each of which has a test that fails loudly when a
+   * new panel forgets one.
+   */
+  _initSavedPlaces() {
+    if (!this._savedPlacesList || !this._savedPlacesForm) return;
+    const { doc } = syncSeed(
+      this._savedPlacesStorage(), SAVED_PLACES_SEED, SAVED_PLACES_SEED_VERSION,
+    );
+    this._savedPlacesDocument = doc;
+    this._renderSavedPlaces();
+
+    const showForm = (show) => {
+      this._savedPlacesForm.hidden = !show;
+      if (show) {
+        this._savedPlacesName.value = '';
+        this._savedPlacesName.focus();
+      }
+    };
+    document.getElementById('saved-places-save')
+      ?.addEventListener('click', () => showForm(this._savedPlacesForm.hidden));
+    document.getElementById('saved-places-cancel')
+      ?.addEventListener('click', () => showForm(false));
+    this._savedPlacesForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      this._saveCurrentPlace(this._savedPlacesName.value, this._savedPlacesScope.value);
+      showForm(false);
+    });
+    document.getElementById('saved-places-export')
+      ?.addEventListener('click', () => this._exportSavedPlaces());
+    document.getElementById('saved-places-import')
+      ?.addEventListener('click', () => this._savedPlacesFile?.click());
+    this._savedPlacesFile?.addEventListener('change', (event) => {
+      const file = event.target.files?.[0];
+      if (file) void this._importSavedPlaces(file);
+      event.target.value = '';
+    });
+  }
+
+  /** `localStorage` behind a guard — access itself throws in a private window. */
+  _savedPlacesStorage() {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  _setSavedPlacesStatus(text) {
+    if (this._savedPlacesStatusEl) this._savedPlacesStatusEl.textContent = text || '';
+  }
+
+  _persistSavedPlaces(doc, message) {
+    this._savedPlacesDocument = doc;
+    const ok = writeStore(this._savedPlacesStorage(), doc);
+    this._renderSavedPlaces();
+    // Say so when the write failed, rather than showing a row that will not
+    // survive a reload.
+    this._setSavedPlacesStatus(ok ? message : 'Could not save — browser storage is unavailable.');
+  }
+
+  _saveCurrentPlace(name, scope) {
+    const hash = this.shareLinkManager?.captureViewState?.();
+    if (!hash) {
+      this._setSavedPlacesStatus('Could not read the current view.');
+      return;
+    }
+    const { doc, place, reason } = addPlace(this._savedPlacesDocument, {
+      name,
+      hash,
+      scope,
+      savedAt: Date.now(),
+    });
+    if (!place) {
+      this._setSavedPlacesStatus(reason === 'invalid-hash'
+        ? 'That view could not be captured.'
+        : 'Could not save that view.');
+      return;
+    }
+    this._persistSavedPlaces(doc, `Saved "${place.name}".`);
+  }
+
+  /**
+   * Replay a saved place.
+   *
+   * Camera ownership goes through the same deferred-navigation handoff every
+   * other flight uses, so a recall cannot steal the camera from the cockpit or
+   * from a newer user action. Layers are applied separately because the share
+   * restore callback does not carry them — boot hands them to the layer-state
+   * coordinator, and `applyLayerState()` is that path made re-entrant.
+   */
+  async _recallSavedPlace(id) {
+    const place = findPlace(this._savedPlacesDocument, id);
+    if (!place) return;
+    const generation = this._beginDeferredNavigation('saved place');
+    const applyCamera = Number.isInteger(generation)
+      && this._reassertNavigationHandoff(generation);
+    this._setSavedPlacesStatus(`Recalling "${place.name}"...`);
+    try {
+      const result = await this.shareLinkManager.restoreViewState(
+        applyScopeToHash(place.hash, place.scope),
+        { scope: place.scope, applyCamera, navigationToken: generation },
+      );
+      if (place.scope === 'full') {
+        const state = this.shareLinkManager.parseHashState(place.hash);
+        await this._layerStateCoordinator?.applyLayerState?.(state?.layerState || null);
+      }
+      this._setSavedPlacesStatus(result?.succeeded === false
+        ? `Could not recall "${place.name}".`
+        : `Recalled "${place.name}".`);
+    } catch (error) {
+      this._setSavedPlacesStatus(`Could not recall "${place.name}".`);
+      console.warn('[SavedPlaces] recall failed:', error);
+    }
+  }
+
+  _renameSavedPlace(id) {
+    const place = findPlace(this._savedPlacesDocument, id);
+    if (!place) return;
+    const next = window.prompt('Rename this place', place.name);
+    if (next === null) return;
+    if (!next.trim()) {
+      this._setSavedPlacesStatus('A name is required.');
+      return;
+    }
+    // Re-add under the new name so the id re-slugs and the entry stays deduped.
+    const { doc } = addPlace(removePlace(this._savedPlacesDocument, id), {
+      name: next,
+      hash: place.hash,
+      scope: place.scope,
+      note: place.note,
+      savedAt: place.savedAt,
+    });
+    this._persistSavedPlaces(doc, `Renamed to "${next.trim()}".`);
+  }
+
+  _deleteSavedPlace(id) {
+    const place = findPlace(this._savedPlacesDocument, id);
+    if (!place) return;
+    this._persistSavedPlaces(
+      removePlace(this._savedPlacesDocument, id),
+      `Deleted "${place.name}".`,
+    );
+  }
+
+  /** Flip one place between replaying everything and replaying position only. */
+  _toggleSavedPlaceScope(id) {
+    const place = findPlace(this._savedPlacesDocument, id);
+    if (!place) return;
+    const nextScope = place.scope === 'camera' ? 'full' : 'camera';
+    const places = this._savedPlacesDocument.places.map((entry) => (
+      entry.id === id ? { ...entry, scope: nextScope } : entry
+    ));
+    this._persistSavedPlaces(
+      { ...this._savedPlacesDocument, places },
+      nextScope === 'camera'
+        ? `"${place.name}" now replays position only.`
+        : `"${place.name}" now replays everything.`,
+    );
+  }
+
+  /** Export matters: localStorage dies with the browser profile, with no server copy. */
+  _exportSavedPlaces() {
+    try {
+      const blob = new Blob([exportDocument(this._savedPlacesDocument)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'keyhole-saved-places.json';
+      link.click();
+      URL.revokeObjectURL(url);
+      this._setSavedPlacesStatus(`Exported ${this._savedPlacesDocument.places.length} place(s).`);
+    } catch {
+      this._setSavedPlacesStatus('Export failed.');
+    }
+  }
+
+  async _importSavedPlaces(file) {
+    try {
+      const { doc, ok } = importDocument(await file.text());
+      if (!ok) {
+        // Fail closed, loudly. Silently importing an empty list would look like
+        // the file was fine and the user had simply saved nothing.
+        this._setSavedPlacesStatus('That file was written by a newer version and was not imported.');
+        return;
+      }
+      this._persistSavedPlaces(doc, `Imported ${doc.places.length} place(s).`);
+    } catch {
+      this._setSavedPlacesStatus('Could not read that file.');
+    }
+  }
+
+  _renderSavedPlaces() {
+    const list = this._savedPlacesList;
+    if (!list) return;
+    list.textContent = '';
+    const places = this._savedPlacesDocument?.places || [];
+    if (places.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'saved-places-empty';
+      empty.textContent = 'No saved places yet.';
+      list.appendChild(empty);
+      return;
+    }
+    for (const place of places) {
+      const row = document.createElement('div');
+      row.className = 'saved-places-row';
+      row.setAttribute('role', 'listitem');
+      row.dataset.placeId = place.id;
+
+      const recall = document.createElement('button');
+      recall.type = 'button';
+      recall.className = 'saved-places-recall';
+      // textContent, never innerHTML — the name is user input.
+      recall.textContent = place.name;
+      recall.title = place.note || `Recall ${place.name}`;
+      recall.addEventListener('click', () => void this._recallSavedPlace(place.id));
+
+      const scopeChip = document.createElement('button');
+      scopeChip.type = 'button';
+      scopeChip.className = 'saved-places-scope-chip';
+      scopeChip.textContent = place.scope === 'camera' ? 'POS' : 'ALL';
+      scopeChip.title = place.scope === 'camera'
+        ? 'Replays position only — click to replay everything'
+        : 'Replays everything — click to replay position only';
+      scopeChip.addEventListener('click', () => this._toggleSavedPlaceScope(place.id));
+
+      const rename = document.createElement('button');
+      rename.type = 'button';
+      rename.className = 'saved-places-icon';
+      rename.textContent = '✎';
+      rename.title = `Rename ${place.name}`;
+      rename.setAttribute('aria-label', `Rename ${place.name}`);
+      rename.addEventListener('click', () => this._renameSavedPlace(place.id));
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'saved-places-icon saved-places-icon-danger';
+      remove.textContent = '✕';
+      remove.title = `Delete ${place.name}`;
+      remove.setAttribute('aria-label', `Delete ${place.name}`);
+      remove.addEventListener('click', () => this._deleteSavedPlace(place.id));
+
+      row.append(recall, scopeChip, rename, remove);
+      list.appendChild(row);
+    }
+  }
+
   _initLocationBar() {
-    const QWERTY_KEYS = ['Q', 'W', 'E', 'R', 'T'];
 
     // Render city pills (no submenu wrappers — POI row is separate)
     for (const [cityId, city] of Object.entries(CITY_POIS)) {
@@ -9335,7 +9641,7 @@ export class StyleManager {
         || e.target === this._locationSearch;
       if (isFormControl) return;
 
-      const keyIndex = QWERTY_KEYS.indexOf(e.key.toUpperCase());
+      const keyIndex = POI_HOTKEYS.indexOf(e.key.toUpperCase());
       if (keyIndex === -1) return;
 
       const city = CITY_POIS[this._expandedCityId];
@@ -9524,7 +9830,6 @@ export class StyleManager {
    * @returns {void}
    */
   _expandPOIRow(cityId) {
-    const QWERTY_KEYS = ['Q', 'W', 'E', 'R', 'T'];
     const city = CITY_POIS[cityId];
     if (!city) return;
 
@@ -9536,7 +9841,7 @@ export class StyleManager {
       const pill = document.createElement('button');
       pill.className = 'poi-pill';
       pill.dataset.poiIndex = idx;
-      pill.innerHTML = `<span class="poi-pill-key">${QWERTY_KEYS[idx] || idx + 1}</span><span class="poi-pill-name">${poi.name}</span>`;
+      pill.innerHTML = `<span class="poi-pill-key">${POI_HOTKEYS[idx] || idx + 1}</span><span class="poi-pill-name">${poi.name}</span>`;
       pill.addEventListener('click', () => this._onPoiClick(cityId, idx));
       this._poiRow.appendChild(pill);
     });

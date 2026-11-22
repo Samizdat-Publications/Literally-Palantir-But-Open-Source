@@ -1,0 +1,166 @@
+{
+  "_comment": "Curated screenshot list. Sources live in the gitignored qa-shots/ working directory; the committed artifact is the JPEG built by scripts/build-gallery.mjs. Add an entry here and re-run the script to include a new shot.",
+  "shots": [
+    {
+      "slug": "globe-boot",
+      "section": "The console",
+      "title": "First launch over Austin",
+      "caption": "Google photorealistic 3D tiles under the sensor HUD: classification banner, MGRS and lat/lon readout, GSD and NIIRS, and the mission-control launcher. Cesium ion and Google Maps attribution stays visible, as their licences require.",
+      "source": "qa-shots/verify/A1-boot.png"
+    },
+    {
+      "slug": "traffic-london",
+      "section": "The console",
+      "title": "Live street traffic over Westminster",
+      "caption": "2,213 vehicles tracking the London road network from OpenStreetMap geometry and TomTom flow. The HUD reverse-geocodes the view unprompted — here, Big Ben and Parliament.",
+      "source": "qa-shots/verify/A3c-traffic-London.png"
+    },
+    {
+      "slug": "submarine-cables",
+      "section": "The console",
+      "title": "Submarine cables, global",
+      "caption": "712 cable routes and 1,917 landing points from TeleGeography — 2,629 entities of static reference geometry.",
+      "source": "qa-shots/verify/A3b-15-telegeography-submarine-cables.png"
+    },
+    {
+      "slug": "saved-places",
+      "section": "The console",
+      "title": "Saved places",
+      "caption": "Bookmark the complete view — camera, style, layers, panels — and replay it mid-session. ALL replays everything; POS replays position only.",
+      "source": "qa-shots/verify/SP-2-saved.png"
+    },
+    {
+      "slug": "wonders-colosseum",
+      "section": "Wonders",
+      "title": "Colosseum, Rome",
+      "caption": "GSD 0.10 m — the sharpest site in the set. The hypogeum floor is legible inside the arena.",
+      "source": "qa-shots/dest/wonders-0-Colosseum.png"
+    },
+    {
+      "slug": "wonders-chichen-itza",
+      "section": "Wonders",
+      "title": "Chichén Itzá, Mexico",
+      "caption": "GSD 0.11 m. El Castillo centre-frame with the Temple of the Warriors and the ball court.",
+      "source": "qa-shots/dest/wonders-1-Chich-n-Itz-.png"
+    },
+    {
+      "slug": "wonders-giza",
+      "section": "Wonders",
+      "title": "Great Pyramid of Giza",
+      "caption": "Full photogrammetry — the pyramid mass and the mastaba field, with Cairo behind.",
+      "source": "qa-shots/dest/wonders-2-Great-Pyramid-of-Giza.png"
+    },
+    {
+      "slug": "wonders-taj-mahal",
+      "section": "Wonders",
+      "title": "Taj Mahal, Agra",
+      "caption": "GSD 0.17 m. The complex, its four minarets and the charbagh gardens, with the Yamuna beyond.",
+      "source": "qa-shots/dest/wonders-3-Taj-Mahal.png"
+    },
+    {
+      "slug": "wonders-redeemer",
+      "section": "Wonders",
+      "title": "Christ the Redeemer, Rio de Janeiro",
+      "caption": "The statue on the Corcovado summit with Rio and the Atlantic behind. This framing took three attempts — see docs/DESTINATIONS.md.",
+      "source": "qa-shots/dest/wonders-4-Christ-the-Redeemer.png"
+    },
+    {
+      "slug": "nature-grand-canyon",
+      "section": "Nature",
+      "title": "Grand Canyon, South Rim",
+      "caption": "Mather Point. Terrain rather than photogrammetry, but the relief carries it.",
+      "source": "qa-shots/dest/nature-0-Grand-Canyon.png"
+    },
+    {
+      "slug": "nature-niagara",
+      "section": "Nature",
+      "title": "Niagara Falls",
+      "caption": "GSD 0.22 m. Horseshoe Falls centre-frame with the whole cataract.",
+      "source": "qa-shots/dest/nature-1-Niagara-Falls.png"
+    },
+    {
+      "slug": "nature-matterhorn",
+      "section": "Nature",
+      "title": "Matterhorn",
+      "caption": "The peak against sky, glaciers and the Alps behind.",
+      "source": "qa-shots/dest/nature-2-Matterhorn.png"
+    },
+    {
+      "slug": "nature-uluru",
+      "section": "Nature",
+      "title": "Uluru",
+      "caption": "Layered flanks and the red plain running to the horizon.",
+      "source": "qa-shots/dest/nature-3-Uluru.png"
+    },
+    {
+      "slug": "nature-grand-prismatic",
+      "section": "Nature",
+      "title": "Grand Prismatic Spring, Yellowstone",
+      "caption": "Blue centre, orange bacterial mats, and the Firehole River.",
+      "source": "qa-shots/dest/nature-4-Grand-Prismatic-Spring.png"
+    },
+    {
+      "slug": "nature-iguazu",
+      "section": "Nature",
+      "title": "Iguazú Falls",
+      "caption": "GSD 0.29 m. The full cataract system on the Argentina–Brazil border.",
+      "source": "qa-shots/dest/nature-5-Iguaz-Falls.png"
+    },
+    {
+      "slug": "nature-yosemite",
+      "section": "Nature",
+      "title": "Yosemite Valley",
+      "caption": "Framed from Tunnel View — granite walls and the Sierra crest beyond.",
+      "source": "qa-shots/dest/nature-6-Yosemite-Valley.png"
+    },
+    {
+      "slug": "orbit-1",
+      "section": "Orbit",
+      "title": "Orbit — start",
+      "caption": "Press O after flying to a destination and the camera circles it at about 6°/sec, a full revolution in roughly a minute. These three frames are the same landmark ~7 seconds apart.",
+      "source": "qa-shots/dest/orbit-1.png"
+    },
+    {
+      "slug": "orbit-2",
+      "section": "Orbit",
+      "title": "Orbit — mid arc",
+      "caption": "",
+      "source": "qa-shots/dest/orbit-2.png"
+    },
+    {
+      "slug": "orbit-3",
+      "section": "Orbit",
+      "title": "Orbit — continuing",
+      "caption": "",
+      "source": "qa-shots/dest/orbit-3.png"
+    },
+    {
+      "slug": "bases-bragg-pope",
+      "section": "Bases",
+      "title": "Fort Bragg — Pope Field",
+      "caption": "The Pope Field runway, taxiways and hangar line. GSD 0.28 m.",
+      "source": "qa-shots/dest/bases-0-Fort-Bragg-Pope-Field.png"
+    },
+    {
+      "slug": "bases-benning-airborne",
+      "section": "Bases",
+      "title": "Fort Benning — Airborne School",
+      "caption": "The 250 ft free-fall towers around the circular landing field. Shown in the CRT style the app now opens in.",
+      "source": "qa-shots/dest/bases-2-Fort-Benning-Airborne-School.png"
+    },
+    {
+      "slug": "bases-sill-oldpost",
+      "section": "Bases",
+      "title": "Fort Sill — Old Post",
+      "caption": "The historic Old Post quadrangle and the artillery park.",
+      "source": "qa-shots/dest/bases-4-Fort-Sill-Old-Post.png"
+    },
+    {
+      "slug": "conflict-emed",
+      "section": "Conflict",
+      "title": "Conflict watch — Eastern Mediterranean",
+      "caption": "The Conflict watch saved place recalled: live vessels, civil and military flights, and mapped installations, at 150 km. NASA FIRMS is deliberately off — see docs/CONFLICT-VIEW.md for why.",
+      "source": "qa-shots/dest/conflict-emed.png"
+    }
+  ]
+}

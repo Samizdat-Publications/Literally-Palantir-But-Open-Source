@@ -1325,8 +1325,28 @@ const OPENAI_REALTIME_REASONING_DEFAULT = 'low';
 const OPENAI_REALTIME_CONTEXT_TOKENS_DEFAULT = 3000;
 const OPENAI_REALTIME_CONTEXT_RETENTION_DEFAULT = 0.5;
 const OPENAI_HUD_SUMMARY_MODEL_DEFAULT = 'gpt-5-nano';
-/** Gemini model for the HUD summary. Model ids drift — override in .env, not here. */
-const GEMINI_HUD_SUMMARY_MODEL_DEFAULT = 'gemini-3.1-pro-preview';
+/**
+ * Gemini model for the HUD summary. Model ids drift — override in .env, not here.
+ *
+ * MUST be a model that does not spend output tokens on internal reasoning. The
+ * request below hard-caps `maxOutputTokens` at 100, which is generous for a
+ * five-word summary but is consumed ENTIRELY by a thinking model's reasoning
+ * pass before it emits any text. Measured live 2026-08-29 against the real
+ * instruction and a realistic payload (place + street + nearby + layers):
+ *
+ *   gemini-3.1-pro-preview   maxOutputTokens=100  → 97 thinking tokens,
+ *                            finishReason=MAX_TOKENS, text="" → summary null
+ *                            (same call at 400 → 384 thinking tokens, works;
+ *                             at 1000 → 958. Thinking expands to fill the cap.)
+ *   gemini-3.1-flash-lite    maxOutputTokens=100  → 0 thinking tokens,
+ *                            finishReason=STOP, correct five words, ~1.5 s
+ *
+ * The pro model therefore returned `{summary:null, error:null}` with HTTP 200 —
+ * a SILENT failure: the HUD simply showed nothing and nothing logged. Prefer a
+ * non-thinking model here; ROADMAP.md → Decisions also asks the interactive
+ * path to stay on fast models, and this one is 3–4× quicker.
+ */
+const GEMINI_HUD_SUMMARY_MODEL_DEFAULT = 'gemini-3.1-flash-lite';
 /** Google AI Studio (Gemini API) base. NOT Vertex AI, which uses GCP service-account auth. */
 const GEMINI_API_BASE_DEFAULT = 'https://generativelanguage.googleapis.com/v1beta';
 const REALTIME_DEBUG_LOG_DIR = path.join(__dirname, '.gev-logs');

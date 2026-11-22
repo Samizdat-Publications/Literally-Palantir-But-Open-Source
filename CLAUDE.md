@@ -18,7 +18,7 @@ reasoning and for the AI provider split. `FORK-NOTES.md` records provenance.
 
 | | |
 |---|---|
-| **Node** | **24.14.x–24.x or 26.x.** Enforced by `package.json` `engines`. Node 22 and 25 are rejected; 24.13 installs but warns `EBADENGINE`. |
+| **Node** | **24.14.x–24.x or 26.x.** Enforced by `package.json` `engines`. Node 22 and 25 are rejected; 24.13 installs but warns `EBADENGINE`. The operator's machine runs **24.19.0** as of 2026-08-29 (`winget install OpenJS.NodeJS.LTS`). |
 | **Dev server** | `npm run dev -- --host localhost --port 4173` |
 | **Tests** | `npm test` — 2,601 unit tests, expect 0 failures. Takes ~90s. |
 | **Google key** | `GOOGLE_MAPS_API_KEY` is **required**. `src/main.js:85` throws deliberately without it — the app stops at the splash screen. |
@@ -198,7 +198,7 @@ on top of upstream's four.
 **A shot only touches the layers it NAMES.** `sceneLayerPlan` leaves undeclared
 layers exactly as it found them, so a tour that omits a layer inherits whatever
 the previous tour left on — which on a loaded globe is a frame-rate problem.
-Every demo tour therefore declares all 14 registered layers explicitly, most of
+Every demo tour therefore declares all 14 *registry-listed* layers explicitly, most of
 them `false`. `src/demoTours.test.mjs` enforces that.
 
 `sceneLayerPlan` also **drops unregistered layer ids silently**, so a typo in a
@@ -209,7 +209,15 @@ guards against that too. The registered ids are:
 flights  military  earthquakes  satellites  rocket-launches  traffic
 cctv  radio  bikeshare  ais-live-vessels  military-installations
 local-firms  local-dams  local-datacenters
+military-awareness  telegeography-submarine-cables
 ```
+
+**The last two are registered at runtime but missing from
+`REGISTERED_LAYER_IDS` in `src/demoTours.test.mjs`** (verified 2026-08-29 by
+reading `dataManager.getAll()` in a live browser — `scenePolicy.test.mjs` has
+all 16). No tour declares either, so the "declares every layer" guard cannot
+catch a tour inheriting the 2,629-entity cables layer. See
+`docs/VERIFIED-STATE.md`.
 
 Styles: `retro` `surveillance` `thermal` `anime` `noir` `snow`.
 

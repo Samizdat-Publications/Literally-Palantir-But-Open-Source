@@ -10,6 +10,29 @@ state: what is done, what is next, and what will bite.
 
 ## Where things stand
 
+> **Updated 2026-08-29 by the first LOCAL session.** PRs #1–#6 are all merged.
+> Current work is branch `claude/local-verification`, draft PR #7.
+> **2,644 tests pass, 0 failures.**
+>
+> The app has now actually been RUN and looked at — see
+> [`VERIFIED-STATE.md`](VERIFIED-STATE.md), which supersedes any "unverified"
+> language below. Headlines: the globe renders, all 16 layers return data, 50
+> checks from the existing Puppeteer harness pass on Windows, and two real
+> defects were found that no cloud session could have seen.
+>
+> - **Fixed:** the Gemini HUD summary returned `{summary:null}` with HTTP 200 —
+>   a thinking model against a hard 100-token output cap. Default is now
+>   `gemini-3.1-flash-lite`.
+> - **Built:** saved places (open item 2). Store, re-entrant restore, seed, UI
+>   in the location tray, 20 tests plus a browser proof.
+> - **Blocked and re-spec'd:** the weather radar layer. Its `ImageryLayer`
+>   approach draws nothing on the default basemap, because the photorealistic
+>   tileset replaces the Cesium globe. `WEATHER-RADAR-SPEC.md` now carries the
+>   measurement and two workable options.
+> - **Still open:** `demoTours.test.mjs` registers 14 of the 16 real layers, so
+>   the "every tour declares every layer" guard cannot catch a tour inheriting
+>   the 2,629-entity cables layer. ROADMAP open item 9.
+
 Branch `claude/repo-setup-api-keys-b5jc6x`, open **draft** PR #5 against `main`.
 PRs #1–#4 are merged. **2,616 tests pass, 0 failures.**
 
@@ -38,6 +61,9 @@ It carries everything below.
   question doesn't need them". See [`LAYER-COST.md`](LAYER-COST.md).
 
 ## Next, in order
+
+> Superseded 2026-08-29: item 2 is BUILT and item 1 is blocked on a rendering
+> decision (see the box above). The live queue is `ROADMAP.md` → Open items.
 
 1. **Weather radar layer.** Approved, not built.
    [`WEATHER-RADAR-SPEC.md`](WEATHER-RADAR-SPEC.md) — RainViewer, free, keyless,
