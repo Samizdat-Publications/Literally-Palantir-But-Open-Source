@@ -1,3 +1,4 @@
+import { createStandalonePlaceSearch } from './standalone/placeSearch.js';
 // Camera-framing mode contract for fly_to_location (field test 8 + rootcause doc §3):
 // parks/lakes/campuses and streets are NOT precise POIs — flying to "Zilker Park" at
 // building range (250 m) lands on a random rooftop. Pure mapping tests, no network.
@@ -20,10 +21,11 @@ import {
   GLOBE_VIEW,
   searchAndFlyTo,
 } from './locations.js';
+import { bindFakeCesiumCamera } from './testSupport/fakeCameraPort.mjs';
 
 function stubViewer() {
   const flights = [];
-  return {
+  return bindFakeCesiumCamera({
     flights,
     scene: { globe: null, canvas: { clientWidth: 0, clientHeight: 0 } },
     camera: {
@@ -38,7 +40,7 @@ function stubViewer() {
       lookAt() {},
       lookAtTransform() {},
     },
-  };
+  });
 }
 
 const AUSTIN_RESULT = {
@@ -62,7 +64,7 @@ async function runSearch(viewer, options, { result = AUSTIN_RESULT, query = 'aus
     json: async () => ({ status: 'OK', results: [result] }),
   });
   try {
-    return await searchAndFlyTo(viewer, query, options);
+    return await searchAndFlyTo(viewer, query, { placeSearch: createStandalonePlaceSearch({ resolveApiKey: () => globalThis.window?.__GOOGLE_MAPS_API_KEY__ }), ...options });
   } finally {
     globalThis.fetch = priorFetch;
     if (hadWindow) globalThis.window = priorWindow;
@@ -116,7 +118,7 @@ test('admin types win over area types when both present', () => {
   assert.equal(geocodeNavigationMode(['locality', 'park', 'political']), 'city-overview');
 });
 
-// Natural-region framing heuristic (field test 2026-07-23): "take me to the
+// Natural-region framing heuristic (owner field test 2026-07-23): "take me to the
 // Rocky Mountains" geocodes as natural_feature with a ~2,700 km viewport — framing
 // the whole box flies the camera to space. Region-scale viewports get a capped
 // oblique swath instead; ordinary parks/lakes keep full-viewport framing.
@@ -149,6 +151,124 @@ test('regionFramingPlan: E-W elongated region looks along the east axis', () => 
   });
   assert.equal(plan.mode, 'swath');
   assert.equal(plan.headingDeg, 90);
+});
+
+// Compatibility guard for inherited geocode authority, not a newly fixed bug.
+test('search retains main geocode authority for Gold Coast, Australia', async () => {
+  const viewer = stubViewer();
+  const result = await runSearch(viewer, {}, {
+    query: 'Gold Coast',
+    result: {
+      formatted_address: 'Gold Coast, Queensland, Australia',
+      types: ['locality', 'political'],
+      geometry: {
+        location: { lat: -28, lng: 153.4 },
+        viewport: boxOf(-28.2, 153.2, -27.8, 153.6),
+      },
+    },
+  });
+  assert.equal(result.label, 'Gold Coast, Queensland, Australia');
+  assert.equal(result.navigationMode, 'city-overview');
+  assert.equal(viewer.flights.length, 1);
+  const flown = flownRectangleDegrees(viewer);
+  assert.ok(Math.abs((flown.south + flown.north) / 2 + 28) < 0.000001);
+  assert.ok(Math.abs((flown.west + flown.east) / 2 - 153.4) < 0.000001);
+});
+
+function alpsViewer() {
+  const viewer = stubViewer();
+  Object.assign(viewer.camera.positionCartographic, {
+    latitude: Cesium.Math.toRadians(46.5),
+    longitude: Cesium.Math.toRadians(10),
+    height: 248_000,
+  });
+  return viewer;
+}
+
+test('a successful nearby recovery resolves after a geocoder miss', async () => {
+  const viewer = alpsViewer();
+  const result = await searchAndFlyTo(viewer, 'the Alps', {
+    placeSearch: { async geocode() { return { place: null, answered: true }; } },
+    recoverNearView: async () => ({
+      lat: 46.6,
+      lon: 10.1,
+      label: 'The Alps local landmark',
+      types: ['locality', 'political'],
+      viewport: { low: { latitude: 46.5, longitude: 10 }, high: { latitude: 46.7, longitude: 10.2 } },
+    }),
+  });
+  assert.equal(result.label, 'The Alps local landmark');
+  assert.equal(result.navigationMode, 'city-overview');
+  assert.equal(viewer.flights.length, 1);
+});
+
+test('a geocoder miss returns null even over a namesake region', async () => {
+  for (const answered of [true, false]) {
+    const viewer = alpsViewer();
+    const result = await searchAndFlyTo(viewer, 'the Alps', {
+      placeSearch: { async geocode() { return { place: null, answered }; } },
+      recoverNearView: async () => null,
+    });
+    assert.equal(result, null);
+    assert.equal(viewer.flights.length, 0);
+  }
+});
+
+test('a geocoder rejection propagates without nearby recovery or a flight', async () => {
+  const viewer = alpsViewer();
+  const failure = new Error('geocoder failed');
+  let recoveries = 0;
+  await assert.rejects(searchAndFlyTo(viewer, 'the Alps', {
+    placeSearch: { async geocode() { throw failure; } },
+    recoverNearView: async () => { recoveries += 1; return null; },
+  }), (error) => error === failure);
+  assert.equal(recoveries, 0);
+  assert.equal(viewer.flights.length, 0);
+});
+
+test('search cancellation before or during geocoding cannot issue a flight', async () => {
+  for (const preAborted of [true, false]) {
+    const viewer = alpsViewer();
+    const controller = new AbortController();
+    if (preAborted) controller.abort();
+    let geocodes = 0;
+    let recoveries = 0;
+    await assert.rejects(searchAndFlyTo(viewer, 'the Alps', {
+      signal: controller.signal,
+      placeSearch: {
+        async geocode(_query, { signal }) {
+          geocodes += 1;
+          assert.equal(signal, controller.signal);
+          controller.abort();
+          return { place: null, answered: true };
+        },
+      },
+      recoverNearView: async () => { recoveries += 1; return null; },
+    }), { name: 'AbortError' });
+    assert.equal(geocodes, preAborted ? 0 : 1);
+    assert.equal(recoveries, 0);
+    assert.equal(viewer.flights.length, 0);
+  }
+});
+
+test('cancellation during nearby recovery cannot issue a flight', async () => {
+  const viewer = alpsViewer();
+  const controller = new AbortController();
+  let authorityChecks = 0;
+  await assert.rejects(searchAndFlyTo(viewer, 'the Alps', {
+    signal: controller.signal,
+    placeSearch: { async geocode() { return { place: null, answered: true }; } },
+    recoverNearView: async () => {
+      controller.abort();
+      return {
+        lat: 46.6, lon: 10.1, label: 'Alpine landmark',
+        types: ['locality'],
+      };
+    },
+    beforeFly: () => { authorityChecks += 1; return true; },
+  }), { name: 'AbortError' });
+  assert.equal(authorityChecks, 0);
+  assert.equal(viewer.flights.length, 0);
 });
 
 test('regionFramingPlan: park- and lake-scale viewports keep full framing', () => {
@@ -474,7 +594,7 @@ test('regionFramingPlan: invalid viewports return null', () => {
   assert.equal(regionFramingPlan({ southwest: { lat: NaN, lng: 0 }, northeast: { lat: 1, lng: 1 } }), null);
 });
 
-// Globe-view preset (field test 2026-07-23): "zoom out to a globe view" needs an
+// Globe-view preset (owner field test 2026-07-23): "zoom out to a globe view" needs an
 // ABSOLUTE full-earth framing — the relative zoom tool can never reach it. The preset
 // must sit inside the app's own 'global' view-scale band (>12,000 km camera height,
 // classifyViewScale in gevActions.js) and under the fly_to rangeM ceiling (20,000 km).
@@ -485,29 +605,22 @@ test('GLOBE_VIEW preset height sits in the global view band', () => {
   assert.equal(GLOBE_VIEW.pitchDeg, -90);
 });
 
-// The globe flight's callbacks are what resolves Reset Globe / zoom_to_globe.
-// They were published under this module's OWN option names (`onComplete` /
-// `onCancel`), which Cesium's Camera.flyTo ignores — so neither ever fired and
-// every caller resolved off its ~4.2 s watchdog timeout instead of the flight.
-test('the globe flight publishes its callbacks under Cesium\'s own option names', () => {
+// The globe flight's callbacks are what resolves Reset Globe / zoom_to_globe:
+// each must reach the caller when the flight ends that way.
+test('the globe flight ends through its own callbacks', () => {
   const viewer = stubViewer();
   const fired = [];
-  flyToGlobeView(viewer, {
+  const hooks = {
     onComplete: () => fired.push('complete'),
     onCancel: () => fired.push('cancel'),
-  });
-
-  const flight = viewer.flights[0];
-  assert.equal(typeof flight.complete, 'function', 'Cesium resolves arrival through `complete`');
-  assert.equal(typeof flight.cancel, 'function', 'Cesium reports supersession through `cancel`');
-  // Not merely present under both spellings: the ignored names must be gone,
-  // or a later reader can "fix" the wrong one back.
-  assert.equal('onComplete' in flight, false, 'Cesium ignores onComplete — do not publish it');
-  assert.equal('onCancel' in flight, false, 'Cesium ignores onCancel — do not publish it');
-
-  flight.complete();
-  flight.cancel();
+  };
+  flyToGlobeView(viewer, hooks);
+  flyToGlobeView(viewer, hooks);
+  viewer.flights[0].complete();
+  viewer.flights[1].cancel();
   assert.deepEqual(fired, ['complete', 'cancel'], 'each hook reaches the caller it belongs to');
+  viewer.flights[0].cancel();
+  assert.deepEqual(fired, ['complete', 'cancel'], 'a flight ends once');
 });
 
 test('a globe flight without callbacks still flies (both hooks are optional)', () => {
@@ -515,8 +628,22 @@ test('a globe flight without callbacks still flies (both hooks are optional)', (
   const target = flyToGlobeView(viewer);
   assert.equal(viewer.flights.length, 1);
   assert.equal(target.heightM, GLOBE_VIEW.heightM);
-  assert.equal(viewer.flights[0].complete, undefined);
-  assert.equal(viewer.flights[0].cancel, undefined);
+  viewer.flights[0].complete();
+});
+
+test('a globe flight to a given view flies there, not out over the current spot', () => {
+  const viewer = stubViewer();
+  const target = flyToGlobeView(viewer, {
+    view: { lon: -82.5, lat: 35, height: 23000000 },
+  });
+  assert.deepEqual(target, { latitude: 35, longitude: -82.5, heightM: 23000000 });
+  const flight = viewer.flights[0];
+  const end = Cesium.Cartographic.fromCartesian(flight.destination);
+  assert.ok(Math.abs(Cesium.Math.toDegrees(end.longitude) + 82.5) < 1e-6);
+  assert.ok(Math.abs(Cesium.Math.toDegrees(end.latitude) - 35) < 1e-6);
+  assert.ok(Math.abs(end.height - 23000000) < 1);
+  assert.equal(flight.orientation.heading, 0);
+  assert.ok(Math.abs(flight.orientation.pitch + Math.PI / 2) < 1e-9);
 });
 
 test('geocoded Location branches forward the resolved-navigation ownership hook', () => {
@@ -555,8 +682,13 @@ test('city and landmark flights expose completion and cancellation hooks', () =>
     onComplete: () => overviewEvents.push('complete'),
     onCancel: () => overviewEvents.push('cancel'),
   });
+  flyToPresetLocation(overviewViewer, 'austin', {
+    viewMode: 'overview',
+    onComplete: () => overviewEvents.push('complete'),
+    onCancel: () => overviewEvents.push('cancel'),
+  });
   overviewViewer.flights[0].complete();
-  overviewViewer.flights[0].cancel();
+  overviewViewer.flights[1].cancel();
   assert.deepEqual(overviewEvents, ['complete', 'cancel']);
 
   const landmarkViewer = stubViewer();
@@ -565,8 +697,12 @@ test('city and landmark flights expose completion and cancellation hooks', () =>
     onComplete: () => landmarkEvents.push('complete'),
     onCancel: () => landmarkEvents.push('cancel'),
   });
+  flyToPresetLocation(landmarkViewer, 'austin', {
+    onComplete: () => landmarkEvents.push('complete'),
+    onCancel: () => landmarkEvents.push('cancel'),
+  });
   landmarkViewer.flights[0].complete();
-  landmarkViewer.flights[0].cancel();
+  landmarkViewer.flights[1].cancel();
   assert.deepEqual(landmarkEvents, ['complete', 'cancel']);
 });
 
@@ -596,4 +732,98 @@ test('search without an authority hook preserves the existing caller contract', 
   const result = await runSearch(viewer, {});
   assert.equal(result.navigationMode, 'city-overview');
   assert.equal(viewer.flights.length, 1);
+});
+
+test('near-view recovery searches through the application place search', async () => {
+  // Recovery must use the place search the application configured, not the module default.
+  const viewer = stubViewer();
+  const placeSearch = createStandalonePlaceSearch({ resolveApiKey: () => 'test-key' });
+  let received = null;
+  await runSearch(viewer, {
+    placeSearch,
+    recoverNearView: async (...args) => {
+      received = args[4];
+      return null;
+    },
+  });
+  assert.equal(received, placeSearch);
+});
+
+test('a precise search without an outline frames against the resolved ground, not sea level', async () => {
+  // Camp Mabry field report: with no detailed outline (no configured Overpass)
+  // framing used the 250 m landmark range from a sea-level target, and the eye
+  // landed about 1 m above the 171 m mesh. The ground service now anchors it.
+  const viewer = stubViewer();
+  const resolved = [];
+  const warmed = [];
+  const ground = {
+    async resolveGroundFloorCellsBounded(points) {
+      resolved.push(...points);
+    },
+    cachedGroundFloor: () => 171,
+    warmGroundFloor: (points) => warmed.push(...points),
+  };
+  const result = await runSearch(
+    viewer,
+    {
+      ground,
+      features: {
+        getFocusFootprints: async () => ({
+          unavailable: true,
+          retryable: false,
+          code: 'OVERPASS_NOT_CONFIGURED',
+        }),
+      },
+      recoverNearView: async () => null,
+    },
+    {
+      query: 'Camp Mabry',
+      result: {
+        formatted_address: 'Camp Mabry, Austin, TX',
+        types: ['point_of_interest', 'establishment'],
+        geometry: { location: { lat: 30.3125, lng: -97.765 } },
+      },
+    },
+  );
+  assert.equal(result.navigationMode, 'precise-place');
+  assert.equal(result.outlineUnavailable, true);
+  assert.equal(resolved.length, 1);
+  assert.equal(warmed.length, 1);
+  const flight = viewer.flights[0];
+  const target = Cesium.Cartographic.fromCartesian(flight.sphere.center);
+  assert.ok(Math.abs(target.height - (171 + 30)) < 0.5, `target ${target.height}`);
+  const eye = target.height + flight.offset.range * Math.sin(-flight.offset.pitch);
+  assert.ok(eye > 171 + 100, `eye ${eye} must clear the 171 m surface`);
+});
+
+test('searchAndFlyTo reports the place it flew to, whichever framing it chose', async () => {
+  // A city frames its viewport.
+  const city = await runSearch(stubViewer(), {});
+  assert.equal(city.latitude, 30.2672);
+  assert.equal(city.longitude, -97.7431);
+  // A precise place flies to a landmark.
+  const place = await runSearch(stubViewer(), {}, {
+    query: 'Texas State Capitol',
+    result: {
+      formatted_address: '1100 Congress Ave, Austin, TX',
+      types: ['establishment', 'point_of_interest'],
+      geometry: { location: { lat: 30.2747, lng: -97.7403 } },
+    },
+  });
+  assert.equal(place.latitude, 30.2747);
+  assert.equal(place.longitude, -97.7403);
+  // A natural region frames a swath.
+  const region = await runSearch(stubViewer(), {}, {
+    query: 'Rocky Mountains',
+    result: {
+      formatted_address: 'Rocky Mountains',
+      types: ['natural_feature', 'establishment'],
+      geometry: {
+        location: { lat: 43.7, lng: -110.7 },
+        viewport: { southwest: { lat: 35, lng: -118 }, northeast: { lat: 52, lng: -104 } },
+      },
+    },
+  });
+  assert.equal(region.latitude, 43.7);
+  assert.equal(region.longitude, -110.7);
 });

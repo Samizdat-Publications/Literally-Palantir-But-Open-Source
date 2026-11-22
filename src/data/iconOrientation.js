@@ -2,7 +2,11 @@
  * Shared icon-orientation + horizon helpers. Orientation and culling serve the
  * moving-entity layers (commercial flights, military flights, AIS vessels);
  * `skyBackdropFactor` serves the detection overlay, which needs the same
- * silhouette geometry to know what a label is being read against.
+ * silhouette geometry to know what a label is being read against. The helpers
+ * that read the default renderer's scene or camera (`screenProjectedRotation`,
+ * `perspectiveProjectedRotation`, `horizonOccluder`, `cameraPoseSignature`)
+ * live in `src/render/cesium/iconOrientation.js`; the camera-basis rotation
+ * itself is `courseScreenRotation` in `screenRotation.js`.
  *
  * THE ORIENTATION PROBLEM (2026-06-10 playtest): billboards are camera-facing
  * quads, so "point along the real-world course" must be computed in SCREEN
@@ -21,86 +25,10 @@
  * keeps rotation continuous through tracked orbits; field evidence, not an
  * unverified math swap, decides whether exact projection becomes preferred.
  */
-import * as Cesium from 'cesium';
+import { WGS84 } from '../geo/ellipsoid.js';
+import { stabilizeScreenRotation } from './screenRotation.js';
 
-/** Meters used to give the course vector a stable projection magnitude. */
-const FORWARD_PROBE_M = 2000;
-/**
- * Minimum camera-plane component before we trust the angle — below this the
- * course points almost exactly into/out of the screen and the angle is noise.
- */
-const MIN_SCREEN_COMPONENT_M = 0.5;
-/** Ignore sub-degree projection noise while retaining deliberate camera-orbit rotation. */
-const ROTATION_DEADBAND_RAD = Cesium.Math.toRadians(0.5);
-
-const _scratchEnu = new Cesium.Matrix4();
-const _scratchForward = new Cesium.Cartesian3();
-const _scratchWorldForward = new Cesium.Cartesian3();
-
-/**
- * Computes the billboard rotation (radians, CCW-positive, for
- * alignedAxis = Cartesian3.ZERO) that points an icon along its real-world
- * course in the stable camera-basis approximation described above.
- *
- * @param {Cesium.Scene} scene - The scene (projection source).
- * @param {Cesium.Cartesian3} position - Entity world position.
- * @param {number} courseDeg - Course/track in degrees clockwise from north.
- * @param {number|null} previous - Rotation to keep when projection is
- *   unavailable (off-screen/behind camera/degenerate).
- * @returns {number|null} Rotation in radians, or `previous` when unknown.
- */
-export function screenProjectedRotation(scene, position, courseDeg, previous = null) {
-  const camera = scene?.camera;
-  if (!camera?.rightWC || !camera?.upWC || !position) return previous;
-
-  const courseRad = Cesium.Math.toRadians(courseDeg || 0);
-  Cesium.Cartesian3.fromElements(
-    Math.sin(courseRad) * FORWARD_PROBE_M,
-    Math.cos(courseRad) * FORWARD_PROBE_M,
-    0,
-    _scratchForward
-  );
-  const enu = Cesium.Transforms.eastNorthUpToFixedFrame(position, Cesium.Ellipsoid.WGS84, _scratchEnu);
-  Cesium.Matrix4.multiplyByPointAsVector(enu, _scratchForward, _scratchWorldForward);
-
-  // Screen x follows camera-right. Window y grows downward, the opposite of
-  // camera-up. Projecting the vector itself avoids clipping/behind-camera
-  // failure modes from the old forward-point worldToWindowCoordinates probe.
-  const dx = Cesium.Cartesian3.dot(_scratchWorldForward, camera.rightWC);
-  const dy = -Cesium.Cartesian3.dot(_scratchWorldForward, camera.upWC);
-  if (
-    (dx * dx + dy * dy)
-    < MIN_SCREEN_COMPONENT_M * MIN_SCREEN_COMPONENT_M
-  ) return previous;
-
-  // Window y grows downward; rotation 0 = icon pointing screen-up.
-  // Icon direction in window coords after CCW rotation r is (-sin r, -cos r),
-  // so matching the projected course (dx, dy) gives r = atan2(-dx, -dy).
-  return Math.atan2(-dx, -dy);
-}
-
-/**
- * Hold a billboard rotation when the newly projected angle differs only by
- * sub-degree render noise. The comparison uses the shortest wrapped arc so
- * values around ±π do not jump.
- *
- * @param {number|null} previous Last displayed rotation.
- * @param {number|null} next Newly projected rotation.
- * @param {number} [deadbandRad=ROTATION_DEADBAND_RAD] Angular hold threshold.
- * @returns {number|null} Stable rotation.
- */
-export function stabilizeScreenRotation(
-  previous,
-  next,
-  deadbandRad = ROTATION_DEADBAND_RAD,
-) {
-  if (!Number.isFinite(next)) return Number.isFinite(previous) ? previous : null;
-  if (!Number.isFinite(previous)) return next;
-  const delta = Math.atan2(Math.sin(next - previous), Math.cos(next - previous));
-  return Math.abs(delta) < Math.max(0, deadbandRad) ? previous : next;
-}
-
-const _occluder = new Cesium.EllipsoidalOccluder(Cesium.Ellipsoid.WGS84, new Cesium.Cartesian3());
+export { stabilizeScreenRotation };
 
 /**
  * Half-width of the crossfade band centred on the ellipsoid silhouette, in
@@ -111,7 +39,7 @@ const _occluder = new Cesium.EllipsoidalOccluder(Cesium.Ellipsoid.WGS84, new Ces
  */
 export const HORIZON_FEATHER_RAD = 0.019;
 
-const _wgs84OneOverRadii = Cesium.Ellipsoid.WGS84.oneOverRadii;
+const _wgs84OneOverRadii = WGS84.oneOverRadii;
 
 /**
  * How much SKY sits behind a world point from this camera: 0 (planet behind)
@@ -123,7 +51,7 @@ const _wgs84OneOverRadii = Cesium.Ellipsoid.WGS84.oneOverRadii;
  * ABOVE the ellipsoid the horizon is the tangent silhouette and the test is a
  * genuine ray/ellipsoid hit test: 1 means the view ray through the point misses
  * the planet entirely. Here the function is the exact complement of
- * {@link horizonOccluder} — the occluder asks whether the planet is in FRONT of
+ * `horizonOccluder` (`src/render/cesium/iconOrientation.js`) — the occluder asks whether the planet is in FRONT of
  * a point (cull it), this asks whether it is BEHIND (what a screen-space label
  * anchored there is read against). For any point the occluder keeps, a ray that
  * hits the ellipsoid must hit it beyond the point, so the hit/miss test alone
@@ -169,7 +97,11 @@ const _wgs84OneOverRadii = Cesium.Ellipsoid.WGS84.oneOverRadii;
  * @param {number} [featherRad=HORIZON_FEATHER_RAD] Half-width of the blend band.
  * @returns {number} 0 (ground behind) … 1 (sky behind).
  */
-export function skyBackdropFactor(cameraPosition, position, featherRad = HORIZON_FEATHER_RAD) {
+export function skyBackdropFactor(
+  cameraPosition,
+  position,
+  featherRad = HORIZON_FEATHER_RAD,
+) {
   if (!cameraPosition || !position) return 0;
 
   const s = _wgs84OneOverRadii;
@@ -212,30 +144,4 @@ export function skyBackdropFactor(cameraPosition, position, featherRad = HORIZON
   // Smoothstep: C1-continuous, so a contact crossing the horizon fades rather
   // than steps, and the fade has no visible corner at either edge of the band.
   return t * t * (3 - 2 * t);
-}
-
-/**
- * Returns the shared horizon occluder, updated to the camera's position.
- * With the Cesium globe hidden (Google 3D tiles provide the planet) nothing
- * writes far-side depth, so billboards must be horizon-culled manually.
- * Call once per tick, then test points with occluder.isPointVisible(pos).
- *
- * @param {Cesium.Camera} camera - The scene camera.
- * @returns {Cesium.EllipsoidalOccluder}
- */
-export function horizonOccluder(camera) {
-  _occluder.cameraPosition = camera.positionWC;
-  return _occluder;
-}
-
-/**
- * Cheap camera pose signature for "did the camera move" gating of rotation
- * passes (position quantized to ~10m, angles to ~0.06 deg).
- * @param {Cesium.Camera} camera - The scene camera.
- * @returns {string}
- */
-export function cameraPoseSignature(camera) {
-  const p = camera.positionWC;
-  return `${Math.round(p.x / 10)}:${Math.round(p.y / 10)}:${Math.round(p.z / 10)}:` +
-    `${camera.heading.toFixed(3)}:${camera.pitch.toFixed(3)}:${camera.roll.toFixed(3)}`;
 }

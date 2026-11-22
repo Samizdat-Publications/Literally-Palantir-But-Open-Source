@@ -1,8 +1,23 @@
 const CONTEXT_DEPENDENCIES = Object.freeze({
-  flights: new Set(['military-awareness', 'flights', 'military', 'ais-live-vessels', 'military-installations']),
-  'space-missions': new Set(['rocket-launches', 'satellites']),
+  flights: new Set([
+    'military-awareness',
+    'flights',
+    'military',
+    'ais-live-vessels',
+    'military-installations',
+  ]),
 });
 const CONTEXT_COMPANIONS = new Set(['radio']);
+/**
+ * Layers Context never touches: Space Missions and the Satellites layer it
+ * depends on. Contacts neither switches them off on entry nor restores them
+ * on exit, so they run beside it in either order and keep their own state
+ * (the mission controller owns the Satellites dependency).
+ */
+export const CONTEXT_INDEPENDENT_LAYER_IDS = Object.freeze([
+  'rocket-launches',
+  'satellites',
+]);
 /** Return whether an origin represents a direct user choice on this route. */
 export function isExplicitUserIntentOrigin(origin, layerId = null) {
   return origin === 'user' || origin === 'voice';
@@ -11,11 +26,14 @@ export function isExplicitUserIntentOrigin(origin, layerId = null) {
 /** Preserve explicit layer intent that completes while a stale restore is queued. */
 export function recordContextRestoreExplicitChange({ restoreState, change }) {
   if (
-    !restoreState?.enabledLayerIds
-    || change?.type !== 'visibility'
-    || !isExplicitUserIntentOrigin(change.origin, change.layerId)
-  ) return false;
-  if (!restoreState.explicitLayerStates) restoreState.explicitLayerStates = new Map();
+    !restoreState?.enabledLayerIds ||
+    change?.type !== 'visibility' ||
+    !isExplicitUserIntentOrigin(change.origin, change.layerId) ||
+    CONTEXT_INDEPENDENT_LAYER_IDS.includes(change.layerId)
+  )
+    return false;
+  if (!restoreState.explicitLayerStates)
+    restoreState.explicitLayerStates = new Map();
   restoreState.explicitLayerStates.set(change.layerId, Boolean(change.enabled));
   if (change.enabled) restoreState.enabledLayerIds.add(change.layerId);
   else restoreState.enabledLayerIds.delete(change.layerId);
@@ -23,30 +41,41 @@ export function recordContextRestoreExplicitChange({ restoreState, change }) {
 }
 
 /** Settle every explicit Context-restore replay without losing semantic failures. */
-export async function settleContextIntentReplay({ restoreState, setEnabled, notificationToken = null }) {
+export async function settleContextIntentReplay({
+  restoreState,
+  setEnabled,
+  notificationToken = null,
+}) {
   if (restoreState?.cancelled) return null;
   const entries = [...(restoreState?.explicitLayerStates || [])];
-  const results = await Promise.allSettled(entries.map(([layerId, enabled]) => (
-    setEnabled(layerId, enabled, {
-      origin: 'context-intent-replay',
-      ...(notificationToken ? { notificationToken } : {}),
-    })
-  )));
-  const failedIndexes = results.flatMap((result, index) => (
-    result.status === 'rejected' || result.value === false ? [index] : []
-  ));
+  const results = await Promise.allSettled(
+    entries.map(([layerId, enabled]) =>
+      setEnabled(layerId, enabled, {
+        origin: 'context-intent-replay',
+        ...(notificationToken ? { notificationToken } : {}),
+      }),
+    ),
+  );
+  const failedIndexes = results.flatMap((result, index) =>
+    result.status === 'rejected' || result.value === false ? [index] : [],
+  );
   if (failedIndexes.length === 0) return null;
   const failedLayerIds = failedIndexes.map((index) => entries[index][0]);
   const rejected = failedIndexes
     .map((index) => results[index])
     .find((result) => result.status === 'rejected');
-  const error = rejected?.reason instanceof Error
-    ? rejected.reason
-    : new Error(`Context intent replay failed for ${failedLayerIds.map((layerId) => `"${layerId}"`).join(', ')}`);
-  error.failedLayerIds = [...new Set([
-    ...(Array.isArray(error.failedLayerIds) ? error.failedLayerIds : []),
-    ...failedLayerIds,
-  ])];
+  const error =
+    rejected?.reason instanceof Error
+      ? rejected.reason
+      : new Error(
+          `Context intent replay failed for ${failedLayerIds.map((layerId) => `"${layerId}"`).join(', ')}`,
+        );
+  error.failedLayerIds = [
+    ...new Set([
+      ...(Array.isArray(error.failedLayerIds) ? error.failedLayerIds : []),
+      ...failedLayerIds,
+    ]),
+  ];
   return error;
 }
 
@@ -54,18 +83,29 @@ export async function settleContextIntentReplay({ restoreState, setEnabled, noti
 export function mergeContextTransitionErrors(primaryError, secondaryError) {
   if (!primaryError) return secondaryError || null;
   if (!secondaryError) return primaryError;
-  primaryError.failedLayerIds = [...new Set([
-    ...(Array.isArray(primaryError.failedLayerIds) ? primaryError.failedLayerIds : []),
-    ...(Array.isArray(secondaryError.failedLayerIds) ? secondaryError.failedLayerIds : []),
-  ])];
+  primaryError.failedLayerIds = [
+    ...new Set([
+      ...(Array.isArray(primaryError.failedLayerIds)
+        ? primaryError.failedLayerIds
+        : []),
+      ...(Array.isArray(secondaryError.failedLayerIds)
+        ? secondaryError.failedLayerIds
+        : []),
+    ]),
+  ];
   return primaryError;
 }
 
 /** Settle a user-facing Context action and convert every failure form to false. */
-export async function settleUserFacingContextAction({ operation, onFailure, falseIsFailure = true }) {
+export async function settleUserFacingContextAction({
+  operation,
+  onFailure,
+  falseIsFailure = true,
+}) {
   try {
     const result = await operation();
-    if (falseIsFailure && result === false) throw new Error('Context transition did not complete');
+    if (falseIsFailure && result === false)
+      throw new Error('Context transition did not complete');
     return result;
   } catch (error) {
     try {
@@ -83,7 +123,7 @@ export async function settleUserFacingContextAction({ operation, onFailure, fals
  * one into `userAdded` makes exit restoration re-enable the mode layer the
  * user just turned off.
  */
-export const CONTEXT_ENTRY_LAYER_IDS = Object.freeze(['military-awareness', 'rocket-launches']);
+export const CONTEXT_ENTRY_LAYER_IDS = Object.freeze(['military-awareness']);
 
 /**
  * Leave a Context transaction: publish the settled coordination flag, then
@@ -108,7 +148,8 @@ export function settleContextModeChange(owner, changing = false) {
   if (!owner) return;
   const wasChanging = Boolean(owner._contextModeChanging);
   owner._contextModeChanging = Boolean(changing);
-  if (wasChanging && !owner._contextModeChanging) owner._syncContextModeButtons?.();
+  if (wasChanging && !owner._contextModeChanging)
+    owner._syncContextModeButtons?.();
 }
 
 /**
@@ -142,19 +183,25 @@ export async function runWithContextModeChanging(owner, operation) {
  * @param {object|null} input.change DataLayerManager visibility notification.
  * @returns {boolean} Whether the active Context bundle should be disabled.
  */
-export function shouldExitContextForLayerChange({ contextMode, globalContextEnabled, change }) {
+export function shouldExitContextForLayerChange({
+  contextMode,
+  globalContextEnabled,
+  change,
+}) {
   if (
-    change?.type !== 'visibility'
-    || !isExplicitUserIntentOrigin(change.origin, change.layerId)
-    || change.layerId === 'military-awareness'
-    || CONTEXT_COMPANIONS.has(change.layerId)
+    change?.type !== 'visibility' ||
+    !isExplicitUserIntentOrigin(change.origin, change.layerId) ||
+    change.layerId === 'military-awareness' ||
+    CONTEXT_COMPANIONS.has(change.layerId) ||
+    CONTEXT_INDEPENDENT_LAYER_IDS.includes(change.layerId)
   ) {
     return false;
   }
   const active = Boolean(globalContextEnabled || contextMode);
   if (!active) return false;
 
-  const dependencies = CONTEXT_DEPENDENCIES[contextMode] || new Set(['military-awareness']);
+  const dependencies =
+    CONTEXT_DEPENDENCIES[contextMode] || new Set(['military-awareness']);
   if (change.enabled) return false;
   return Boolean(contextMode && dependencies.has(change.layerId));
 }
@@ -168,6 +215,7 @@ export function contextAllowedLayerIds(contextMode) {
   return new Set([
     ...(CONTEXT_DEPENDENCIES[contextMode] || ['military-awareness']),
     ...CONTEXT_COMPANIONS,
+    ...CONTEXT_INDEPENDENT_LAYER_IDS,
   ]);
 }
 
@@ -181,25 +229,10 @@ export function contextAllowedLayerIds(contextMode) {
  */
 export function shouldCaptureContextSession(change) {
   return Boolean(
-    ['visibility-requested', 'visibility-will-change'].includes(change?.type)
-    && isExplicitUserIntentOrigin(change.origin, change.layerId)
-    && change.enabled
-    && CONTEXT_ENTRY_LAYER_IDS.includes(change.layerId)
-  );
-}
-
-/**
- * Return whether one explicit mission intent superseded an in-flight Clear All
- * reservation and therefore needs deferred Context adoption.
- */
-export function shouldDeferContextEntryDuringClear({ change, clearInFlight }) {
-  return Boolean(
-    clearInFlight
-    && change?.type === 'visibility-requested'
-    && change.layerId === 'rocket-launches'
-    && change.enabled === true
-    && isExplicitUserIntentOrigin(change.origin, change.layerId)
-    && Number.isInteger(change.intentEpoch)
+    ['visibility-requested', 'visibility-will-change'].includes(change?.type) &&
+    isExplicitUserIntentOrigin(change.origin, change.layerId) &&
+    change.enabled &&
+    CONTEXT_ENTRY_LAYER_IDS.includes(change.layerId),
   );
 }
 
@@ -218,11 +251,16 @@ export function shouldDeferContextEntryDuringClear({ change, clearInFlight }) {
  * @param {string|null} [input.effectiveContextMode] Committed or entering mode.
  * @returns {boolean} Whether the snapshot's userAdded set was modified.
  */
-export function recordContextSessionUserChange({ snapshot, change, effectiveContextMode = null }) {
+export function recordContextSessionUserChange({
+  snapshot,
+  change,
+  effectiveContextMode = null,
+}) {
   if (
-    !snapshot?.userAdded
-    || change?.type !== 'visibility'
-    || !isExplicitUserIntentOrigin(change.origin, change.layerId)
+    !snapshot?.userAdded ||
+    change?.type !== 'visibility' ||
+    !isExplicitUserIntentOrigin(change.origin, change.layerId) ||
+    CONTEXT_INDEPENDENT_LAYER_IDS.includes(change.layerId)
   ) {
     return false;
   }
@@ -233,7 +271,11 @@ export function recordContextSessionUserChange({ snapshot, change, effectiveCont
       snapshot.userAdded.add(change.layerId);
       return true;
     }
-    if (contextAllowedLayerIds(effectiveContextMode).has(change.layerId) && !isCompanion) return false;
+    if (
+      contextAllowedLayerIds(effectiveContextMode).has(change.layerId) &&
+      !isCompanion
+    )
+      return false;
     snapshot.userAdded.add(change.layerId);
     if (isCompanion) snapshot.userRemoved?.delete(change.layerId);
     return true;
@@ -264,54 +306,8 @@ export function contextSnapshotLayerIds(
 ) {
   const snapshot = new Set(restoringLayerIds || currentEnabledLayerIds || []);
   for (const layerId of excludeLayerIds || []) snapshot.delete(layerId);
+  for (const layerId of CONTEXT_INDEPENDENT_LAYER_IDS) snapshot.delete(layerId);
   return snapshot;
-}
-
-/**
- * Block layers that would mix unrelated live/current data into Space Missions.
- * The manager calls this before lifecycle work so a refused layer never starts.
- * @param {object} input Current mode and requested visibility transition.
- * @param {string|null} input.contextMode Active Context mode.
- * @param {object|null} input.change Requested visibility transition.
- * @param {string|null} [input.layerName] User-facing layer name.
- * @returns {string|null} Honest user-facing refusal reason, or null when allowed.
- */
-export function contextLayerEnableBlockReason({ contextMode, change, layerName = null }) {
-  if (
-    contextMode !== 'space-missions'
-    || change?.enabled !== true
-    || contextAllowedLayerIds('space-missions').has(change.layerId)
-  ) {
-    return null;
-  }
-  const label = String(layerName || change.layerId || 'that layer');
-  return `Space Missions isolates replay data. Exit the mode to enable ${label}.`;
-}
-
-/**
- * Resolve who owns a cancelled direct Space Missions entry. A newer ON keeps
- * the entry shell reserved for its replacement transaction; every other
- * cancellation must roll back the isolated pre-entry session.
- *
- * @param {object} input Cancellation and current manager intent state.
- * @param {object|null} input.change Manager visibility notification.
- * @returns {'ignore'|'replacement'|'restore'} Cancellation disposition.
- */
-export function spaceMissionEntryCancellationDisposition({
-  change,
-}) {
-  if (
-    change?.type !== 'visibility-cancelled'
-    || change.layerId !== 'rocket-launches'
-    || change.enabled !== true
-  ) return 'ignore';
-  if (
-    change.cancellationReason === 'superseded'
-    && Number.isInteger(change.successorIntentEpoch)
-    && change.successorIntentEpoch > change.intentEpoch
-    && change.successorEnabled === true
-  ) return 'replacement';
-  return 'restore';
 }
 
 /**
@@ -329,29 +325,92 @@ export function contextRestoreLayerIds(snapshot = {}) {
   return restored;
 }
 
+/** The layers an aircraft Cockpit subject can come from. */
+export const COCKPIT_AIRCRAFT_LAYER_IDS = Object.freeze([
+  'flights',
+  'military',
+]);
+
 /**
- * Cockpit entry belongs to the operational Contacts context bundle. A tracked
- * aircraft alone is not sufficient: both observed-flight feeds must still be
- * active so the cockpit's surrounding-contact picture is not presented as a
- * complete context view when one source is disabled.
+ * Cockpit entry needs only the aircraft it rides: that aircraft's own layer
+ * (Live Flights for a civilian, Military Flights for a military aircraft) must
+ * be on. Contacts and the other feeds are not required. When a source the
+ * surrounding picture uses is off, the Cockpit's Contact card and Live
+ * Signals say the picture is partial instead of blocking entry, so a partial
+ * picture is never presented as complete. A Context mode change in flight
+ * still owns the camera, so entry waits it out.
  *
- * @param {object} input Current context and dependency visibility.
- * @param {string|null} input.contextMode Active Context mode.
- * @param {boolean} input.contextModeChanging Whether the Context transaction is unsettled.
- * @param {boolean} input.flightsEnabled Whether Live Flights is enabled.
- * @param {boolean} input.militaryEnabled Whether Military Flights is enabled.
+ * @param {object} input Current subject and Context state.
+ * @param {string|null} input.subjectLayerId Layer of the tracked aircraft
+ *   ('flights' or 'military'), or null with none tracked.
+ * @param {boolean} input.subjectLayerEnabled Whether that layer is enabled.
+ * @param {boolean} input.contextModeChanging Whether a Context transaction is unsettled.
  * @returns {boolean} Whether cockpit entry may be offered or activated.
  */
 export function cockpitEntryAllowed({
-  contextMode,
+  subjectLayerId,
+  subjectLayerEnabled,
   contextModeChanging,
-  flightsEnabled,
-  militaryEnabled,
 }) {
-  return contextMode === 'flights'
-    && !contextModeChanging
-    && Boolean(flightsEnabled)
-    && Boolean(militaryEnabled);
+  return (
+    COCKPIT_AIRCRAFT_LAYER_IDS.includes(subjectLayerId) &&
+    Boolean(subjectLayerEnabled) &&
+    !contextModeChanging
+  );
+}
+
+/**
+ * Whether the selected vessel's bridge view can be entered. Like aircraft
+ * Cockpit it needs only its own layer, Live AIS Vessels, with a vessel
+ * selected. A Context mode change in flight still owns the camera, so entry
+ * waits it out.
+ * @param {{vesselsEnabled: boolean, contextModeChanging: boolean}} state
+ * @returns {boolean}
+ */
+export function bridgeEntryAllowed({ vesselsEnabled, contextModeChanging }) {
+  return Boolean(vesselsEnabled) && !contextModeChanging;
+}
+
+/**
+ * Whether the tracked satellite's orbital view can be entered. Like the
+ * bridge it needs only its own layer, Satellites, with a satellite tracked.
+ * A Context mode change in flight still owns the camera, so entry waits it
+ * out. A subject the satellites layer marks as not enterable (debris:
+ * rocket bodies, fragments, dead satellites; `satelliteClassEnterable` in
+ * src/layers/satellites/classes.js) can be tracked but is never ridden: it is
+ * no mission and has no view to offer.
+ * @param {{satellitesEnabled: boolean, contextModeChanging: boolean,
+ *   subjectEnterable?: boolean}} state
+ * @returns {boolean}
+ */
+export function orbitEntryAllowed({
+  satellitesEnabled,
+  contextModeChanging,
+  subjectEnterable = true,
+}) {
+  return (
+    Boolean(satellitesEnabled) &&
+    !contextModeChanging &&
+    subjectEnterable !== false
+  );
+}
+
+/**
+ * Whether an application subject provider's candidate can be ridden. Like the
+ * bridge and orbit it needs only its own layer on, and waits out a Context
+ * change in flight; the provider then has its own say (`isEntryAllowed`).
+ * @param {{layerEnabled: boolean, contextModeChanging: boolean,
+ *   providerAllows: boolean}} state
+ * @returns {boolean}
+ */
+export function subjectEntryAllowed({
+  layerEnabled,
+  contextModeChanging,
+  providerAllows,
+}) {
+  return (
+    Boolean(layerEnabled) && !contextModeChanging && providerAllows === true
+  );
 }
 
 /**
@@ -365,7 +424,6 @@ export function cockpitEntryAllowed({
  */
 export const CONTEXT_MODE_VOICE_NAMES = Object.freeze({
   flights: 'contacts',
-  'space-missions': 'space-missions',
 });
 
 /**

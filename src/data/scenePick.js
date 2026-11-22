@@ -42,7 +42,23 @@ const MAX_PICK_MAGNITUDE_M = 1_000_000_000;
 export function isPickedWorldPosition(position) {
   if (!position) return false;
   const { x, y, z } = position;
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z))
+    return false;
   const magnitude = Math.hypot(x, y, z);
   return magnitude >= MIN_PICK_MAGNITUDE_M && magnitude <= MAX_PICK_MAGNITUDE_M;
+}
+
+/**
+ * Whether a `scene.pick()` result is the map itself: nothing, or 3D tile
+ * content (which has no id).
+ *
+ * @param {object|null|undefined} picked
+ * @returns {boolean}
+ */
+export function isSurfacePick(picked) {
+  if (!picked) return true;
+  if (picked.id !== undefined) return false;
+  return (
+    picked.content !== undefined || picked.primitive?.isCesium3DTileset === true
+  );
 }

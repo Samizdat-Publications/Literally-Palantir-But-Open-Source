@@ -1,9 +1,11 @@
+import { followedOf, isFollowing, onFollowChanged } from './followed.js';
 import {
   clearOverlaySource,
   setOverlayEntries,
   setOverlaySourceVisible,
 } from '../overlays/worldOverlay.js';
 import { WORLD_OVERLAY_STYLE } from '../overlays/worldOverlayTokens.js';
+import { readEntityRecord } from './entityRecords.js';
 
 /**
  * @module trackedReadout
@@ -49,17 +51,24 @@ let _overlayHost = DEFAULT_TRACKED_OVERLAY_HOST;
  * @param {string} accent Source-owned accent color.
  * @returns {{title:string,details:string[],accent:string}}
  */
-export function trackedLabelModelFromText(text, accent = WORLD_OVERLAY_STYLE.accent) {
+export function trackedLabelModelFromText(
+  text,
+  accent = WORLD_OVERLAY_STYLE.accent,
+) {
   const raw = String(text || '').trim();
   if (!raw) return { title: '', details: [], accent };
   let lines;
   if (raw.includes('\n')) {
-    lines = raw.split('\n').map((line) => line.trim()).filter(Boolean);
+    lines = raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
   } else {
     const parts = raw.split(' · ');
-    lines = parts.length > 1
-      ? [parts[0].trim(), parts.slice(1).join(' · ').trim()]
-      : [raw];
+    lines =
+      parts.length > 1
+        ? [parts[0].trim(), parts.slice(1).join(' · ').trim()]
+        : [raw];
   }
   return { title: lines[0] || '', details: lines.slice(1), accent };
 }
@@ -72,9 +81,10 @@ export function trackedLabelModelFromText(text, accent = WORLD_OVERLAY_STYLE.acc
  * @returns {Object|null}
  */
 export function cachedTrackedDisplayPosition(entity) {
-  if (!entity || typeof entity.gevDisplayPosition !== 'function') return null;
+  const displayPosition = readEntityRecord(entity)?.displayPosition;
+  if (typeof displayPosition !== 'function') return null;
   try {
-    return entity.gevDisplayPosition() || null;
+    return displayPosition() || null;
   } catch {
     return null;
   }
@@ -84,37 +94,40 @@ export function cachedTrackedDisplayPosition(entity) {
  * Anchor for the tracked CARD: the position the target is visually at.
  *
  * A layer that renders its tracked contact as a 3D model publishes
- * `gevVisualPosition`, which returns the translation that model is actually rendering
+ * the entity record's `visualPosition`, which returns the translation that model is actually rendering
  * with. For a grounded aircraft that differs from the display position by the full
  * ground-snap offset (~100 m at an inland airport), so a card anchored to the display
  * position sits below the aircraft and climbs slowly as the coarse floor cell warms.
  *
  * Falls back to the display position, so layers without a 3D visual (and any layer
  * before its model is ready) are unchanged. This deliberately does NOT repurpose
- * `gevDisplayPosition`: that accessor carries the follow-camera anti-jitter contract
+ * the entity record's `displayPosition`: that accessor carries the follow-camera anti-jitter contract
  * and must keep returning the value the camera settled on.
  * @param {Object|null} entity Tracked or selected presentation entity.
  * @returns {Object|null}
  */
 export function cachedTrackedVisualPosition(entity) {
-  if (entity && typeof entity.gevVisualPosition === 'function') {
+  const visualPosition = readEntityRecord(entity)?.visualPosition;
+  if (typeof visualPosition === 'function') {
     try {
-      const visual = entity.gevVisualPosition();
+      const visual = visualPosition();
       if (visual) return visual;
-    } catch { /* fall through to the display position */ }
+    } catch {
+      /* fall through to the display position */
+    }
   }
   return cachedTrackedDisplayPosition(entity);
 }
 
 function entryIdFor(entity) {
-  const explicit = String(entity?.gevTrackedId || '').trim();
+  const explicit = String(readEntityRecord(entity)?.trackedId || '').trim();
   if (explicit) return explicit;
   const fallback = String(entity?.id || '').trim();
   return fallback ? `entity:${fallback}` : null;
 }
 
 function activeEntity() {
-  return _viewer?.trackedEntity || _selectedContext?.entity || null;
+  return followedOf(_viewer)?.entity || _selectedContext?.entity || null;
 }
 
 /**
@@ -123,9 +136,10 @@ function activeEntity() {
  * @returns {Object|null}
  */
 export function createTrackedOverlayEntry(entity) {
-  const model = entity?.gevLabelModel;
+  const record = readEntityRecord(entity);
+  const model = record?.labelModel;
   const id = entryIdFor(entity);
-  if (!id || !model || typeof entity.gevDisplayPosition !== 'function') {
+  if (!id || !model || typeof record.displayPosition !== 'function') {
     return null;
   }
   const title = String(model.title || '').trim();
@@ -140,10 +154,25 @@ export function createTrackedOverlayEntry(entity) {
     collisionGroup: 'ambient-card',
     priority: Number.MAX_SAFE_INTEGER,
     title,
-    details: Array.isArray(model.details) ? model.details.map((line) => String(line)) : [],
+    details: Array.isArray(model.details)
+      ? model.details.map((line) => String(line))
+      : [],
     accent: model.accent || WORLD_OVERLAY_STYLE.accent,
-    anchorRadiusPx: 10,
-    anchorRadiusScale: TRACKED_BILLBOARD_SCALE,
+    cardStyle: model.cardStyle,
+    selected: model.selected === true,
+    leaderStyle: model.leaderStyle,
+    leaderAnimationMs: model.leaderAnimationMs,
+    leaderAnimationStartedAt: model.leaderAnimationStartedAt,
+    leaderDrawRatio: model.leaderDrawRatio,
+    anchorRadiusPx: Number.isFinite(Number(model.anchorRadiusPx))
+      ? Math.max(0, Number(model.anchorRadiusPx))
+      : 10,
+    anchorRadiusScale: Object.prototype.hasOwnProperty.call(
+      model,
+      'anchorRadiusScale',
+    )
+      ? model.anchorRadiusScale
+      : TRACKED_BILLBOARD_SCALE,
     minAnchorGapPx: 16,
     anchorGapPaddingPx: 10,
     verticalOnly: true,
@@ -180,7 +209,7 @@ function syncActiveEntity() {
 }
 
 /**
- * Republish a layer's newly assigned `gevLabelModel` when that entity owns the
+ * Republish an entity record's newly assigned `labelModel` when that entity owns the
  * active tracked readout. Layers call this only when presentation text changes;
  * position remains the live frame-cache getter already registered with host.
  * @param {Object} entity Entity whose model changed.
@@ -194,6 +223,9 @@ export function getActiveTrackedReadoutId() {
   return _activeEntryId;
 }
 
+/** Static-context layers whose click selection publishes the readout card. */
+const READOUT_CONTEXT_LAYERS = new Set(['alpr-cameras', 'local-adsb']);
+
 /**
  * Initialize the model bridge and selection listeners. No render listener is
  * installed; the already-initialized world-overlay host owns the frame lane.
@@ -204,13 +236,13 @@ export function initTrackedReadout(viewer) {
   if (_viewer) destroyTrackedReadout();
   _viewer = viewer;
   _overlayHost.setVisible(TRACKED_OVERLAY_SOURCE_ID, true);
-  _trackedEntityChangedRemove = viewer.trackedEntityChanged?.addEventListener?.(() => {
-    if (viewer.trackedEntity) _selectedContext = null;
+  _trackedEntityChangedRemove = onFollowChanged(viewer, (followed) => {
+    if (followed) _selectedContext = null;
     syncActiveEntity();
-  }) || null;
+  });
   _contextSelectedHandler = (event) => {
     const record = event.detail;
-    if (record?.layerId === 'military-installations') {
+    if (READOUT_CONTEXT_LAYERS.has(record?.layerId)) {
       _selectedContext = record;
       publishEntity(record.entity);
       return;
@@ -221,18 +253,27 @@ export function initTrackedReadout(viewer) {
     }
   };
   _contextClearedHandler = (event) => {
-    if (!_selectedContext || event.detail?.layerId === _selectedContext.layerId) {
+    if (
+      !_selectedContext ||
+      event.detail?.layerId === _selectedContext.layerId
+    ) {
       _selectedContext = null;
       syncActiveEntity();
     }
   };
   _aircraftSelectedHandler = () => {
     _selectedContext = null;
-    if (!_viewer?.trackedEntity) clearTrackedSource();
+    if (!isFollowing(_viewer)) clearTrackedSource();
   };
   window.addEventListener('gev:entity-selected', _contextSelectedHandler);
-  window.addEventListener('gev:entity-selection-cleared', _contextClearedHandler);
-  window.addEventListener('gev:awareness-subject-selected', _aircraftSelectedHandler);
+  window.addEventListener(
+    'gev:entity-selection-cleared',
+    _contextClearedHandler,
+  );
+  window.addEventListener(
+    'gev:awareness-subject-selected',
+    _aircraftSelectedHandler,
+  );
   syncActiveEntity();
   // Boot-verification contract: the track regression harness asserts this
   // exact line at init (dropped by the host migration; restored).
@@ -243,9 +284,18 @@ export function initTrackedReadout(viewer) {
 export function destroyTrackedReadout() {
   _trackedEntityChangedRemove?.();
   _trackedEntityChangedRemove = null;
-  if (_contextSelectedHandler) window.removeEventListener('gev:entity-selected', _contextSelectedHandler);
-  if (_contextClearedHandler) window.removeEventListener('gev:entity-selection-cleared', _contextClearedHandler);
-  if (_aircraftSelectedHandler) window.removeEventListener('gev:awareness-subject-selected', _aircraftSelectedHandler);
+  if (_contextSelectedHandler)
+    window.removeEventListener('gev:entity-selected', _contextSelectedHandler);
+  if (_contextClearedHandler)
+    window.removeEventListener(
+      'gev:entity-selection-cleared',
+      _contextClearedHandler,
+    );
+  if (_aircraftSelectedHandler)
+    window.removeEventListener(
+      'gev:awareness-subject-selected',
+      _aircraftSelectedHandler,
+    );
   _contextSelectedHandler = null;
   _contextClearedHandler = null;
   _aircraftSelectedHandler = null;

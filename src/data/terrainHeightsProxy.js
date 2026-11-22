@@ -24,7 +24,10 @@ function defaultSleep(ms) {
 export function parseTerrainPoints(raw) {
   const text = String(raw || '').trim();
   if (!text) return null;
-  const pairs = text.split(';').map((part) => part.trim()).filter(Boolean);
+  const pairs = text
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean);
   if (pairs.length === 0) return null;
   const points = [];
   for (const pair of pairs) {
@@ -32,7 +35,13 @@ export function parseTerrainPoints(raw) {
     if (parts.length !== 2) return null;
     const lon = Number(parts[0]);
     const lat = Number(parts[1]);
-    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+    if (
+      !Number.isFinite(lon) ||
+      !Number.isFinite(lat) ||
+      Math.abs(lon) > 180 ||
+      Math.abs(lat) > 90
+    )
+      return null;
     points.push([lon, lat]);
   }
   return points;
@@ -58,6 +67,28 @@ export function validTerrainResult(result) {
 }
 
 /**
+ * A row the upstream DID return for its position, but with no usable height:
+ * Re:Earth sporadically answers with a real `elevation` and a null
+ * `geoid`/`ellipsoid`. Measured at ~0.16% of points, and transient — the same
+ * coordinate resolves on a later poll. That is an absent datum, not a failed
+ * refresh, so the point is left uncached to be re-asked while the client
+ * covers it through its bundled geoid. A null/undefined entry is NOT this
+ * case: it means the position was dropped from the response, which is a
+ * genuine upstream fault.
+ * @param {unknown} result
+ */
+export function absentTerrainDatum(result) {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    !Array.isArray(result) &&
+    result.ellipsoid === null &&
+    result.geoid === null &&
+    Number.isFinite(result.elevation)
+  );
+}
+
+/**
  * Convert Retry-After (delta-seconds or HTTP-date) to milliseconds.
  * @param {string|null|undefined} value
  * @param {number} nowMs
@@ -76,23 +107,29 @@ export function terrainRetryAfterMs(value, nowMs = Date.now()) {
 /**
  * Fetch one upstream chunk with jittered exponential backoff. Network errors,
  * 429, and 5xx retry; other HTTP failures and malformed successes fail fast.
- * Retry sleeps and retry attempts share a 10s budget after attempt one.
+ * Retry sleeps and retry attempts share a 10s budget after attempt one. A
+ * Retry-After longer than the budget left ends the retries at once: sleeping
+ * out the budget cannot reach the time the upstream asked for, and it would
+ * delay the caller's own back-off (the proxy's 429 pause) by up to 10 s.
  *
  * Dependencies are injectable for deterministic offline tests.
  * @param {Array<[number, number]>} points
  * @param {object} [options]
  * @returns {Promise<Array<object>>}
  */
-export async function fetchTerrainChunkWithRetry(points, {
-  fetchImpl = globalThis.fetch,
-  sleep = defaultSleep,
-  random = Math.random,
-  now = Date.now,
-  makeSignal = (timeoutMs) => AbortSignal.timeout(timeoutMs),
-  attemptTimeoutMs = 30_000,
-  retryBudgetMs = TERRAIN_RETRY_BUDGET_MS,
-  maxAttempts = TERRAIN_MAX_ATTEMPTS,
-} = {}) {
+export async function fetchTerrainChunkWithRetry(
+  points,
+  {
+    fetchImpl = globalThis.fetch,
+    sleep = defaultSleep,
+    random = Math.random,
+    now = Date.now,
+    makeSignal = (timeoutMs) => AbortSignal.timeout(timeoutMs),
+    attemptTimeoutMs = 30_000,
+    retryBudgetMs = TERRAIN_RETRY_BUDGET_MS,
+    maxAttempts = TERRAIN_MAX_ATTEMPTS,
+  } = {},
+) {
   const pointsParam = points.map(terrainPointKey).join(';');
   const url = `https://terrain.reearth.land/heights.json?points=${encodeURIComponent(pointsParam)}`;
   let retryStartedAt = null;
@@ -111,13 +148,16 @@ export async function fetchTerrainChunkWithRetry(points, {
       const res = await fetchImpl(url, signal ? { signal } : {});
       if (!res.ok) {
         const error = new Error(`HTTP ${res.status}`);
+        error.status = res.status;
         error.retryable = res.status === 429 || res.status >= 500;
         error.retryAfter = res.headers?.get?.('retry-after') ?? null;
         throw error;
       }
       const json = await res.json();
       if (!Array.isArray(json?.results)) {
-        const error = new Error('malformed upstream response (no results array)');
+        const error = new Error(
+          'malformed upstream response (no results array)',
+        );
         error.retryable = false;
         throw error;
       }
@@ -131,21 +171,27 @@ export async function fetchTerrainChunkWithRetry(points, {
       if (remaining <= 0) break;
 
       const retryAfterMs = terrainRetryAfterMs(error?.retryAfter, now());
-      const backoffMs = Math.round(350 * (2 ** attempt) * (0.75 + random() * 0.5));
+      if (retryAfterMs != null && retryAfterMs > remaining) break;
+      const backoffMs = Math.round(
+        350 * 2 ** attempt * (0.75 + random() * 0.5),
+      );
       const requestedDelay = retryAfterMs ?? backoffMs;
       const delayMs = Math.min(requestedDelay, remaining);
       if (delayMs > 0) await sleep(delayMs);
     }
   }
 
-  throw lastError || new Error('terrain heights upstream retry budget exhausted');
+  throw (
+    lastError || new Error('terrain heights upstream retry budget exhausted')
+  );
 }
 
 /**
  * Resolve a requested point batch against a per-point cache and a missing-only
  * fetcher. Results are reconstructed by canonical key in exact request order,
  * including duplicates. Stale values remain eligible only when refresh fails.
- * If any position has no real height, return 502 with no fabricated result.
+ * If any position has no real height, return 502 with no fabricated result;
+ * the body's `partial` lists the real heights it has, null for the rest.
  *
  * @param {object} options
  * @param {Array<[number, number]>} options.points
@@ -171,25 +217,48 @@ export async function resolveTerrainHeightRequest({
   const missing = [];
   for (const [key, point] of unique) {
     const entry = cache.get(key);
-    if (entry && validTerrainResult(entry.result) && requestStartedAt - entry.at < ttlMs) continue;
+    if (
+      entry &&
+      validTerrainResult(entry.result) &&
+      requestStartedAt - entry.at < ttlMs
+    )
+      continue;
     missing.push({ key, point });
   }
 
   let cacheChanged = false;
   let upstreamError = null;
+  let absentPoints = 0;
   if (missing.length > 0) {
     try {
       const fetched = await fetchMissing(missing.map((item) => item.point));
-      if (!Array.isArray(fetched)) throw new Error('malformed upstream response (no results array)');
+      if (!Array.isArray(fetched))
+        throw new Error('malformed upstream response (no results array)');
       const fetchedAt = now();
+      let omittedPositions = 0;
       for (let i = 0; i < missing.length; i += 1) {
         const result = fetched[i];
-        if (!validTerrainResult(result)) continue;
-        cache.set(missing[i].key, { at: fetchedAt, result });
-        cacheChanged = true;
+        if (validTerrainResult(result)) {
+          // Re-insert rather than overwrite: a Map keeps an existing key in
+          // its old position, and the proxy evicts from the front.
+          cache.delete(missing[i].key);
+          cache.set(missing[i].key, { at: fetchedAt, result });
+          cacheChanged = true;
+        } else if (absentTerrainDatum(result)) {
+          // Upstream answered but had no height. Transient, so deliberately
+          // left uncached: the next poll re-asks and usually succeeds.
+          absentPoints += 1;
+        } else {
+          // Missing or malformed positions remain upstream faults.
+          omittedPositions += 1;
+        }
       }
-      if (fetched.length !== missing.length || missing.some((_, i) => !validTerrainResult(fetched[i]))) {
-        upstreamError = new Error('upstream omitted one or more terrain heights');
+      if (omittedPositions > 0 || fetched.length !== missing.length) {
+        const dropped =
+          omittedPositions || Math.abs(fetched.length - missing.length);
+        upstreamError = new Error(
+          `upstream omitted ${dropped} terrain position(s)`,
+        );
       }
     } catch (error) {
       upstreamError = error;
@@ -201,11 +270,24 @@ export async function resolveTerrainHeightRequest({
     return entry && validTerrainResult(entry.result) ? entry.result : null;
   });
   if (results.some((result) => result == null)) {
+    // The real heights this request does have, null elsewhere, so the page
+    // keeps them and uses its geoid only for the rest. Named `partial`, not
+    // `results`, so no reader mistakes it for a complete answer; left out when
+    // no point has a height.
+    const partial = results.some((result) => result != null)
+      ? { partial: results }
+      : {};
     return {
       status: 502,
-      body: { error: 'terrain heights fetch failed and no cache available for every point' },
+      body: {
+        error:
+          'terrain heights fetch failed and no cache available for every point',
+        ...partial,
+      },
       cacheChanged,
       upstreamError,
+      absentPoints,
+      requestedPoints: unique.size,
     };
   }
   return {
@@ -213,5 +295,7 @@ export async function resolveTerrainHeightRequest({
     body: { results },
     cacheChanged,
     upstreamError,
+    absentPoints,
+    requestedPoints: unique.size,
   };
 }

@@ -1,5 +1,29 @@
-import * as Cesium from 'cesium';
 import { governorRequestRender } from './renderGovernor.js';
+import {
+  cameraOf,
+  canvasOf,
+  findCamera,
+  findFrame,
+  findQuery,
+} from './render/rendererOf.js';
+import {
+  moonPositionInertial,
+  sunPositionInertial,
+  temeToPseudoFixed,
+} from './geo/celestial.js';
+import { WGS84 } from './geo/ellipsoid.js';
+import { frameVector } from './geo/frames.js';
+import {
+  dot,
+  magnitude,
+  normalize,
+  PI_OVER_TWO,
+  toRadians,
+} from './geo/vector.js';
+import { worldClock, worldTimeFor } from './time/worldClock.js';
+
+// The ring shows the sun and moon at the time the sky is drawn.
+const skyTime = worldTimeFor('sky');
 
 /** Outer edge of the existing NVG/FLIR keyhole in normalized shader space. */
 export const KEYHOLE_OUTER_RADIUS = 1.05;
@@ -11,13 +35,13 @@ export const GLOBE_EXIT_CLEARANCE_PX = 12;
 export const CELESTIAL_PLANE_EPSILON = 0.045;
 /** Responsive radial fade band used by every keyhole-aligned text overlay —
  * this is the Detection FADE (label/card fading), NOT the scope-mask feather
- * in scopeMask.js. 0.07 since the 2026-08-24 final value (was 0.16). */
+ * in scopeMask.js. 0.07 since the 2026-08-24 owner final lock (was 0.16). */
 export const KEYHOLE_LABEL_FEATHER_RATIO = 0.07;
 export const KEYHOLE_LABEL_FEATHER_MAX_RATIO = 0.4;
 /**
  * First-run OUTSIDE opacity for keyhole-aligned world overlays.
  *
- * 0.01 since 2026-08-24 (final value; 0.03 on 08-23, 0.05 before). Keep in lockstep with
+ * 0.01 since 2026-08-24 (owner final lock; 0.03 on 08-23, 0.05 before). Keep in lockstep with
  * `#detection-opacity-slider`'s markup value AND readout in index.html,
  * `_detectionOutsideOpacityPct` in sharelink.js,
  * `GLOBAL_POST_DEFAULTS.detectionOutsideOpacityPct` in ui.js, and
@@ -28,10 +52,19 @@ export const KEYHOLE_LABEL_FEATHER_MAX_RATIO = 0.4;
  */
 export const KEYHOLE_OUTSIDE_OPACITY_DEFAULT = 0.01;
 
+// How far the world time moves before the sun and moon move with it: a
+// minute moves the sun a quarter of a degree.
+const EPHEMERIS_WORLD_STEP_MS = 60_000;
 const RING_INSET_PX = 11;
 const MARKER_INSET_PX = 36;
 const COLLIDING_MARKER_EXTRA_INSET_PX = 32;
-const MARKER_COLLISION_ANGLE = Cesium.Math.toRadians(6);
+const MARKER_COLLISION_ANGLE = toRadians(6);
+/** The ellipsoid's largest radius, metres. */
+const EARTH_MAX_RADIUS_M = Math.max(
+  WGS84.radii.x,
+  WGS84.radii.y,
+  WGS84.radii.z,
+);
 const FULL_GLOBE_RADIUS_RATIO = 0.61;
 const TAU = Math.PI * 2;
 // This overlay is a secondary HUD treatment. Keep it smooth while reserving
@@ -90,16 +123,30 @@ export function getKeyholeGeometry(width, height) {
  * floor through a band derived from the live keyhole radius.
  */
 export function keyholeLabelAlpha(labelX, labelY, width, height) {
-  return keyholeLabelAlphaFromGeometry(labelX, labelY, getKeyholeGeometry(width, height));
+  return keyholeLabelAlphaFromGeometry(
+    labelX,
+    labelY,
+    getKeyholeGeometry(width, height),
+  );
 }
 
 /** Compute keyhole opacity from geometry already cached by a hot render loop. */
 export function keyholeLabelAlphaFromGeometry(labelX, labelY, geometry) {
-  if (!geometry || !(geometry.radius > 0) || !Number.isFinite(labelX) || !Number.isFinite(labelY)) return 0;
+  if (
+    !geometry ||
+    !(geometry.radius > 0) ||
+    !Number.isFinite(labelX) ||
+    !Number.isFinite(labelY)
+  )
+    return 0;
   const feather = geometry.featherPx;
-  const distance = Math.hypot(labelX - geometry.centerX, labelY - geometry.centerY);
+  const distance = Math.hypot(
+    labelX - geometry.centerX,
+    labelY - geometry.centerY,
+  );
   if (distance <= geometry.radius) return 1;
-  if (!(feather > 0) || distance >= geometry.radius + feather) return keyholeOutsideOpacity;
+  if (!(feather > 0) || distance >= geometry.radius + feather)
+    return keyholeOutsideOpacity;
   const progress = clamp((distance - geometry.radius) / feather, 0, 1);
   return 1 - (1 - keyholeOutsideOpacity) * progress;
 }
@@ -131,7 +178,11 @@ export function isCelestialRingStyleSupported(styleName) {
  * @param {number} lastAngle - Previous stable angle in radians.
  * @returns {{angle:number, opacity:number, stable:boolean}}
  */
-export function celestialScreenAngle(rightComponent, upComponent, lastAngle = 0) {
+export function celestialScreenAngle(
+  rightComponent,
+  upComponent,
+  lastAngle = 0,
+) {
   const planeLength = Math.hypot(rightComponent, upComponent);
   if (!Number.isFinite(planeLength) || planeLength < CELESTIAL_PLANE_EPSILON) {
     return {
@@ -170,38 +221,58 @@ export function isFullGlobeInsideKeyhole(geometry, wasVisible = false) {
     keyholeCenterY,
     keyholeRadius,
   } = geometry || {};
-  const values = [earthCenterX, earthCenterY, earthRadius, keyholeCenterX, keyholeCenterY, keyholeRadius];
-  if (!values.every(Number.isFinite) || earthRadius <= 0 || keyholeRadius <= 0) return false;
-  const offset = Math.hypot(earthCenterX - keyholeCenterX, earthCenterY - keyholeCenterY);
+  const values = [
+    earthCenterX,
+    earthCenterY,
+    earthRadius,
+    keyholeCenterX,
+    keyholeCenterY,
+    keyholeRadius,
+  ];
+  if (!values.every(Number.isFinite) || earthRadius <= 0 || keyholeRadius <= 0)
+    return false;
+  const offset = Math.hypot(
+    earthCenterX - keyholeCenterX,
+    earthCenterY - keyholeCenterY,
+  );
   const clearance = keyholeRadius - (offset + earthRadius);
-  return clearance >= (wasVisible ? GLOBE_EXIT_CLEARANCE_PX : GLOBE_ENTER_CLEARANCE_PX);
+  return (
+    clearance >=
+    (wasVisible ? GLOBE_EXIT_CLEARANCE_PX : GLOBE_ENTER_CLEARANCE_PX)
+  );
 }
 
 /** Return the Earth-disc radius in CSS pixels for a perspective camera. */
 export function earthDiscScreenRadius(cameraDistance, viewportHeight, fovy) {
-  const earthRadiusM = Cesium.Ellipsoid.WGS84.maximumRadius;
+  const earthRadiusM = EARTH_MAX_RADIUS_M;
   if (
-    !Number.isFinite(cameraDistance)
-    || cameraDistance <= earthRadiusM
-    || !(viewportHeight > 0)
-    || !Number.isFinite(fovy)
-    || fovy <= 0
-    || fovy >= Math.PI
-  ) return null;
+    !Number.isFinite(cameraDistance) ||
+    cameraDistance <= earthRadiusM ||
+    !(viewportHeight > 0) ||
+    !Number.isFinite(fovy) ||
+    fovy <= 0 ||
+    fovy >= Math.PI
+  )
+    return null;
   const angularRadius = Math.asin(clamp(earthRadiusM / cameraDistance, 0, 1));
-  const radius = (viewportHeight * 0.5) * Math.tan(angularRadius) / Math.tan(fovy * 0.5);
+  const radius =
+    (viewportHeight * 0.5 * Math.tan(angularRadius)) / Math.tan(fovy * 0.5);
   return Number.isFinite(radius) && radius > 0 ? radius : null;
 }
 
+const EARTH_CENTRE = Object.freeze({ x: 0, y: 0, z: 0 });
+
 /**
- * Project the visible Earth disc into viewport coordinates.
+ * Project the visible Earth disc into viewport coordinates, through the
+ * renderer's camera pose and its query port's projection.
  * Shared by full-globe UI treatments that must agree on visual containment.
  *
- * @param {object} viewer - Cesium Viewer-like object.
+ * @param {object} viewer - The scene object the renderer is found from.
  * @param {number} width - Viewport width in CSS pixels.
  * @param {number} height - Viewport height in CSS pixels.
- * @param {object} [scratchCenter] - Reusable Cesium Cartesian2 result.
- * @param {object} [scratchToCenter] - Reusable Cesium Cartesian3 result.
+ * @param {{x:number,y:number}} [scratchCenter] - Takes the projected centre.
+ * @param {{x:number,y:number,z:number}} [scratchToCenter] - Takes the
+ *   vector from the eye to the Earth's centre.
  * @returns {object|null}
  */
 export function projectEarthDiscToViewport(
@@ -211,27 +282,32 @@ export function projectEarthDiscToViewport(
   scratchCenter = undefined,
   scratchToCenter = undefined,
 ) {
-  const camera = viewer?.camera;
-  const scene = viewer?.scene;
-  if (!camera || !scene || !(width > 0) || !(height > 0)) return null;
+  const camera = findCamera(viewer);
+  if (!camera || !(width > 0) || !(height > 0)) return null;
+  const pose = camera.pose();
+  const eye = pose.position;
 
-  const distance = Cesium.Cartesian3.magnitude(camera.positionWC);
-  if (!Number.isFinite(distance) || distance <= Cesium.Ellipsoid.WGS84.maximumRadius) return null;
+  const distance = magnitude(eye);
+  if (!Number.isFinite(distance) || distance <= EARTH_MAX_RADIUS_M) return null;
 
-  const toCenter = Cesium.Cartesian3.negate(
-    camera.positionWC,
-    scratchToCenter || new Cesium.Cartesian3(),
-  );
-  if (Cesium.Cartesian3.dot(camera.directionWC, toCenter) <= 0) return null;
+  const toCenter = scratchToCenter || { x: 0, y: 0, z: 0 };
+  toCenter.x = -eye.x;
+  toCenter.y = -eye.y;
+  toCenter.z = -eye.z;
+  if (dot(pose.direction, toCenter) <= 0) return null;
 
-  const center = Cesium.SceneTransforms.worldToWindowCoordinates(
-    scene,
-    Cesium.Cartesian3.ZERO,
-    scratchCenter,
-  );
-  if (!center || !Number.isFinite(center.x) || !Number.isFinite(center.y)) return null;
+  const projected = findQuery(viewer)?.project(EARTH_CENTRE);
+  if (
+    !projected ||
+    !Number.isFinite(projected.x) ||
+    !Number.isFinite(projected.y)
+  )
+    return null;
+  const center = scratchCenter || { x: 0, y: 0 };
+  center.x = projected.x;
+  center.y = projected.y;
 
-  const earthRadius = earthDiscScreenRadius(distance, height, camera.frustum?.fovy);
+  const earthRadius = earthDiscScreenRadius(distance, height, pose.fovy);
   if (!earthRadius) return null;
 
   const keyhole = getKeyholeGeometry(width, height);
@@ -286,7 +362,12 @@ function drawSunRays(ctx, cx, cy, radius, innerRadius, angle) {
   glow.addColorStop(0.58, 'rgba(255, 235, 188, 0.027)');
   glow.addColorStop(1, 'rgba(255, 242, 214, 0)');
   ctx.fillStyle = glow;
-  ctx.fillRect(cx - radius - 4, cy - radius - 4, (radius + 4) * 2, (radius + 4) * 2);
+  ctx.fillRect(
+    cx - radius - 4,
+    cy - radius - 4,
+    (radius + 4) * 2,
+    (radius + 4) * 2,
+  );
 
   ctx.lineCap = 'round';
   ctx.shadowColor = 'rgba(255, 232, 171, 0.11)';
@@ -299,7 +380,10 @@ function drawSunRays(ctx, cx, cy, radius, innerRadius, angle) {
     const ex = sx + Math.cos(rayAngle) * rayLength;
     const ey = sy + Math.sin(rayAngle) * rayLength;
     const lineGradient = ctx.createLinearGradient(sx, sy, ex, ey);
-    lineGradient.addColorStop(0, `rgba(255, 230, 166, ${0.075 - Math.abs(i) * 0.011})`);
+    lineGradient.addColorStop(
+      0,
+      `rgba(255, 230, 166, ${0.075 - Math.abs(i) * 0.011})`,
+    );
     lineGradient.addColorStop(1, 'rgba(255, 226, 156, 0)');
     ctx.strokeStyle = lineGradient;
     ctx.lineWidth = i === 0 ? 1.8 : 0.9;
@@ -328,19 +412,37 @@ function drawMoonHaze(ctx, cx, cy, radius, angle) {
   ctx.restore();
 }
 
+// Keys each ring's overlay, so a new ring never reuses an old one's canvases.
+let rings = 0;
+
 /**
  * Screen-space ring and celestial direction overlay for the full-globe view.
+ * The overlay is presented to the celestial ring store, whose view renders it
+ * inside the viewer's container and hands back the two canvases this paints.
  */
 export class CelestialRing {
   /**
-   * @param {Cesium.Viewer} viewer
-   * @param {{enabled?:boolean,onAutoDisable?:Function}} [options]
+   * @param {object} viewer - The scene object the renderer is found from;
+   *   the ring reads its canvas and container (DOM) and reaches the rest
+   *   through the renderer's camera, frame and query ports.
+   * @param {{enabled?:boolean,onAutoDisable?:Function,store:object,preciseFrameAt?:Function}} options
+   *   `store` is the celestial ring store (src/ui/stores/celestialRing.js);
+   *   the keyhole helpers here stay free of Vue for the packages that use
+   *   them. `preciseFrameAt(ms)` gives the ICRF-to-fixed rotation as axes,
+   *   or null while its tables have not loaded; without it, or while it has
+   *   no answer, the ring uses the pseudo-fixed frame.
    */
-  constructor(viewer, { enabled = true, onAutoDisable = null } = {}) {
+  constructor(
+    viewer,
+    { enabled = true, onAutoDisable = null, store, preciseFrameAt = null },
+  ) {
     this.viewer = viewer;
+    this._preciseFrameAt =
+      typeof preciseFrameAt === 'function' ? preciseFrameAt : null;
     this.enabled = !!enabled;
     this.visible = false;
-    this._onAutoDisable = typeof onAutoDisable === 'function' ? onAutoDisable : null;
+    this._onAutoDisable =
+      typeof onAutoDisable === 'function' ? onAutoDisable : null;
     this._focusInProgress = false;
     this._ephemerisDirty = true;
     this._ephemerisUpdateCount = 0;
@@ -354,17 +456,19 @@ export class CelestialRing {
     this._sunRenderKey = '';
     this._moonRenderKey = '';
     this._outlineRenderKey = '';
+    this._sunCanvas = null;
+    this._sunCtx = null;
+    this._moonCanvas = null;
+    this._moonCtx = null;
 
-    this._sunInertial = new Cesium.Cartesian3();
-    this._moonInertial = new Cesium.Cartesian3();
-    this._sunFixed = new Cesium.Cartesian3();
-    this._moonFixed = new Cesium.Cartesian3();
-    this._toCenter = new Cesium.Cartesian3();
-    this._screenCenter = new Cesium.Cartesian2();
-    this._fixedMatrix = new Cesium.Matrix3();
+    this._sunFixed = { x: 0, y: 0, z: 0 };
+    this._moonFixed = { x: 0, y: 0, z: 0 };
+    this._toCenter = { x: 0, y: 0, z: 0 };
+    this._screenCenter = { x: 0, y: 0 };
 
-    this._buildDOM();
-    this._removePostRender = viewer.scene.postRender.addEventListener(() => this._draw());
+    this._initView(store);
+    this._removePostRender =
+      findFrame(viewer)?.on('postRender', () => this._draw()) ?? null;
     // Pre-existing staleness fix (perf wave 2 review): the ephemeris was
     // sampled once per visible-enable from the FROZEN app clock, so the
     // sun/moon markers aged with the app. Resample real wall time each
@@ -374,48 +478,88 @@ export class CelestialRing {
       // Always mark dirty so a long-hidden interval can't serve stale
       // sun/moon vectors on return — but only request the repaint frame
       // while visible; the visibility-restore request (main.js) picks the
-      // dirty flag up immediately. (review review finding)
+      // dirty flag up immediately. (review finding)
       this._ephemerisDirty = true;
       if (typeof document !== 'undefined' && document.hidden) return;
       governorRequestRender('celestial-ephemeris');
     }, 60_000);
+    // A jump in the world time moves the sun and moon at once.
+    // Played through, the sky moves on each minute of world time it passes.
+    this._ephemerisWorldMs = null;
+    this._unsubscribeWorldTime = worldClock.subscribe(({ timeMs }) => {
+      if (
+        this._ephemerisWorldMs !== null &&
+        Math.abs(timeMs - this._ephemerisWorldMs) < EPHEMERIS_WORLD_STEP_MS
+      )
+        return;
+      this._ephemerisWorldMs = timeMs;
+      this._ephemerisDirty = true;
+    });
     this.setEnabled(this.enabled);
   }
 
-  /** Construct cached effect layers and Material Symbols celestial markers. */
-  _buildDOM() {
-    this._root = document.createElement('div');
-    this._root.id = 'celestial-ring-overlay';
-    this._root.className = 'celestial-ring-overlay';
-    this._root.setAttribute('aria-hidden', 'true');
+  /** Present the overlay and take the canvases its view hands back. */
+  _initView(store) {
+    const owner = {};
+    this._store = store;
+    this._owner = owner;
+    this._view = {
+      id: ++rings,
+      owner,
+      container: this.viewer.container,
+      enabled: this.enabled,
+      visible: false,
+      globeVisible: null,
+      ephemerisUpdates: null,
+      size: null,
+      outline: null,
+      sun: null,
+      moon: null,
+      sunMarker: null,
+      moonMarker: null,
+    };
+    this._viewKey = '';
+    store.publish(this._view);
+    store.connect({
+      attach: (from, kind, canvas) => {
+        if (from === owner && this._shown()) this._attach(kind, canvas);
+      },
+    });
+  }
 
-    this._ringOutline = document.createElement('div');
-    this._ringOutline.className = 'celestial-ring-outline';
+  /** Whether the store still shows this ring's overlay. */
+  _shown() {
+    return this._store.ring?.owner === this._owner;
+  }
 
-    this._sunCanvas = document.createElement('canvas');
-    this._sunCanvas.className = 'celestial-ring-canvas celestial-sun-canvas';
-    this._sunCtx = this._sunCanvas.getContext('2d', { alpha: true, desynchronized: true });
-
-    this._moonCanvas = document.createElement('canvas');
-    this._moonCanvas.className = 'celestial-ring-canvas celestial-moon-canvas';
-    this._moonCtx = this._moonCanvas.getContext('2d', { alpha: true, desynchronized: true });
-
-    this._sunMarker = document.createElement('span');
-    this._sunMarker.className = 'celestial-marker celestial-sun material-symbols-outlined';
-    this._sunMarker.textContent = 'light_mode';
-
-    this._moonMarker = document.createElement('span');
-    this._moonMarker.className = 'celestial-marker celestial-moon material-symbols-outlined';
-    this._moonMarker.textContent = 'dark_mode';
-
-    this._root.append(
-      this._ringOutline,
-      this._sunCanvas,
-      this._moonCanvas,
-      this._sunMarker,
-      this._moonMarker
+  /** Publish a change to the overlay, skipping one that changes nothing. */
+  _present(patch) {
+    if (!this._shown()) return;
+    const next = { ...this._view, ...patch };
+    const key = JSON.stringify(next, (name, value) =>
+      name === 'owner' || name === 'container' ? undefined : value,
     );
-    this.viewer.container.appendChild(this._root);
+    if (key === this._viewKey) return;
+    this._view = next;
+    this._viewKey = key;
+    this._store.publish(next);
+  }
+
+  /** Take (or, with null, drop) the canvas the view rendered for one layer. */
+  _attach(kind, canvas) {
+    const ctx =
+      canvas?.getContext('2d', { alpha: true, desynchronized: true }) ?? null;
+    // A new canvas starts blank, so the next frame repaints its layer.
+    if (kind === 'sun') {
+      this._sunCanvas = canvas;
+      this._sunCtx = ctx;
+      this._sunRenderKey = '';
+    } else if (kind === 'moon') {
+      this._moonCanvas = canvas;
+      this._moonCtx = ctx;
+      this._moonRenderKey = '';
+    } else return;
+    if (canvas && this.enabled) governorRequestRender('celestial-ring');
   }
 
   /** Enable or disable the user preference for the effect. */
@@ -427,19 +571,26 @@ export class CelestialRing {
     // rendered frames — under the idle render governor an enable (or the
     // clearing disable) must request its frame or the ring never draws at
     // all. Camera motion covers every later repaint; the 60 s ephemeris
-    // timer requests its own. (perf wave 2 fix — field test finding)
+    // timer requests its own. (perf wave 2 fix — owner playtest finding)
     if (this.enabled !== wasEnabled) governorRequestRender('celestial-ring');
-    this._root.classList.toggle('disabled', !this.enabled);
     if (!this.enabled) {
       this.visible = false;
-      this._root.classList.remove('visible');
       this._clear();
     }
+    this._present({
+      enabled: this.enabled,
+      ...(!this.enabled && { visible: false }),
+    });
+  }
+
+  /** The renderer's canvas; a viewer with no renderer bound, its own. */
+  _canvas() {
+    return canvasOf(this.viewer);
   }
 
   /** Whether the current camera already frames the complete globe inside the keyhole. */
   isGlobeFullyVisible() {
-    const canvas = this.viewer.scene.canvas;
+    const canvas = this._canvas();
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
     if (!(width > 0 && height > 0)) return false;
@@ -454,19 +605,30 @@ export class CelestialRing {
    * @returns {boolean} Whether a valid camera flight was started.
    */
   focusFullGlobe({ duration = 2.4 } = {}) {
-    const canvas = this.viewer.scene.canvas;
+    const canvas = this._canvas();
     const height = canvas.clientHeight || canvas.height;
-    const cartographic = this.viewer.camera.positionCartographic;
-    const fovy = this.viewer.camera.frustum?.fovy;
-    if (!(height > 0) || !cartographic || !Number.isFinite(fovy) || fovy <= 0 || fovy >= Math.PI) {
+    const camera = cameraOf(this.viewer);
+    const pose = camera.pose();
+    const fovy = pose.fovy;
+    if (
+      !(height > 0) ||
+      !Number.isFinite(pose.lon) ||
+      !Number.isFinite(pose.lat) ||
+      !Number.isFinite(fovy) ||
+      fovy <= 0 ||
+      fovy >= Math.PI
+    ) {
       return false;
     }
 
-    const earthRadius = Cesium.Ellipsoid.WGS84.maximumRadius;
-    const keyholeRadius = getKeyholeGeometry(canvas.clientWidth || canvas.width, height).radius;
+    const earthRadius = EARTH_MAX_RADIUS_M;
+    const keyholeRadius = getKeyholeGeometry(
+      canvas.clientWidth || canvas.width,
+      height,
+    ).radius;
     const targetScreenRadius = keyholeRadius * FULL_GLOBE_RADIUS_RATIO;
     const angularRadius = Math.atan(
-      (targetScreenRadius / (height * 0.5)) * Math.tan(fovy * 0.5)
+      (targetScreenRadius / (height * 0.5)) * Math.tan(fovy * 0.5),
     );
     const distance = earthRadius / Math.max(Math.sin(angularRadius), 1e-4);
     const altitude = Math.max(earthRadius * 1.55, distance - earthRadius);
@@ -474,36 +636,37 @@ export class CelestialRing {
     this._focusInProgress = true;
     const finishFocus = () => {
       this._focusInProgress = false;
-      this.viewer.scene.requestRender?.();
+      findFrame(this.viewer)?.requestRender('celestial-focus');
     };
-    this.viewer.camera.flyTo({
-      destination: Cesium.Cartesian3.fromRadians(
-        cartographic.longitude,
-        cartographic.latitude,
-        altitude
-      ),
-      orientation: {
-        heading: this.viewer.camera.heading,
-        pitch: -Cesium.Math.PI_OVER_TWO,
-        roll: 0,
+    camera.flyTo(
+      { lon: pose.lon, lat: pose.lat, height: altitude },
+      {
+        orientation: {
+          heading: pose.heading,
+          pitch: -PI_OVER_TWO,
+          roll: 0,
+        },
+        durationS: duration,
+        easing: 'cubicInOut',
+        onComplete: finishFocus,
+        onCancel: () => {
+          finishFocus();
+          if (!this.isGlobeFullyVisible()) this._autoDisable();
+        },
       },
-      duration,
-      easingFunction: Cesium.EasingFunction.CUBIC_IN_OUT,
-      complete: finishFocus,
-      cancel: () => {
-        finishFocus();
-        if (!this.isGlobeFullyVisible()) this._autoDisable();
-      },
-    });
+    );
     return true;
   }
 
   /** Clear the backing canvas. */
   _clear() {
-    for (const [canvas, ctx] of [[this._sunCanvas, this._sunCtx], [this._moonCanvas, this._moonCtx]]) {
+    for (const [canvas, ctx] of [
+      [this._sunCanvas, this._sunCtx],
+      [this._moonCanvas, this._moonCtx],
+    ]) {
       if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
-    this._ringOutline?.style.setProperty('display', 'none');
+    this._present({ outline: { ...this._view.outline, hidden: true } });
     this._sunRenderKey = '';
     this._moonRenderKey = '';
     this._outlineRenderKey = '';
@@ -512,40 +675,46 @@ export class CelestialRing {
   /** Resize the canvas backing store while drawing in CSS pixels. */
   _resize(width, height) {
     const nativeDpr = Math.max(1, window.devicePixelRatio || 1);
-    const pixelsScale = Math.sqrt(CELESTIAL_MAX_BACKING_PIXELS / (width * height));
-    const dimensionScale = CELESTIAL_MAX_BACKING_DIMENSION / Math.max(width, height);
-    const dpr = Math.min(nativeDpr, CELESTIAL_MAX_DEVICE_PIXEL_RATIO, pixelsScale, dimensionScale);
+    const pixelsScale = Math.sqrt(
+      CELESTIAL_MAX_BACKING_PIXELS / (width * height),
+    );
+    const dimensionScale =
+      CELESTIAL_MAX_BACKING_DIMENSION / Math.max(width, height);
+    const dpr = Math.min(
+      nativeDpr,
+      CELESTIAL_MAX_DEVICE_PIXEL_RATIO,
+      pixelsScale,
+      dimensionScale,
+    );
     const bw = Math.max(1, Math.round(width * dpr));
     const bh = Math.max(1, Math.round(height * dpr));
-    for (const [canvas, ctx] of [[this._sunCanvas, this._sunCtx], [this._moonCanvas, this._moonCtx]]) {
+    for (const [canvas, ctx] of [
+      [this._sunCanvas, this._sunCtx],
+      [this._moonCanvas, this._moonCtx],
+    ]) {
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
         canvas.height = bh;
       }
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
+    this._present({ size: { width, height } });
     this._renderScale = dpr;
   }
 
   /**
    * Sample Earth-fixed directions once per enable. Camera movement only
    * re-projects these cached vectors; it never re-runs the planetary model.
+   * The precise ICRF frame serves once its tables have loaded, the
+   * pseudo-fixed one before.
+   * @param {number} ms Epoch milliseconds.
    */
-  _updateEphemeris(time) {
+  _updateEphemeris(ms) {
     if (!this._ephemerisDirty) return true;
 
-    Cesium.Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(time, this._sunInertial);
-    Cesium.Simon1994PlanetaryPositions.computeMoonPositionInEarthInertialFrame(time, this._moonInertial);
-    const matrix = Cesium.Transforms.computeIcrfToFixedMatrix(time, this._fixedMatrix)
-      || Cesium.Transforms.computeTemeToPseudoFixedMatrix(time, this._fixedMatrix);
-    if (!matrix) return false;
-
-    Cesium.Matrix3.multiplyByVector(matrix, this._sunInertial, this._sunFixed);
-    Cesium.Matrix3.multiplyByVector(matrix, this._moonInertial, this._moonFixed);
-    Cesium.Cartesian3.normalize(this._sunFixed, this._sunFixed);
-    Cesium.Cartesian3.normalize(this._moonFixed, this._moonFixed);
+    const frame = this._preciseFrameAt?.(ms) ?? temeToPseudoFixed(ms);
+    this._sunFixed = normalize(frameVector(frame, sunPositionInertial(ms)));
+    this._moonFixed = normalize(frameVector(frame, moonPositionInertial(ms)));
     this._ephemerisDirty = false;
     this._ephemerisUpdateCount += 1;
     return true;
@@ -569,41 +738,63 @@ export class CelestialRing {
     );
   }
 
-  /** Position one icon-library marker along the keyhole circumference. */
-  _positionMarker(marker, cx, cy, radius, angle, opacity) {
+  /** Where one icon-library marker sits along the keyhole circumference. */
+  _markerPosition(cx, cy, radius, angle, opacity) {
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     const margin = 14;
-    const maxRadiusX = Math.abs(cos) > 1e-4 ? (cx - margin) / Math.abs(cos) : Number.POSITIVE_INFINITY;
-    const maxRadiusY = Math.abs(sin) > 1e-4 ? (cy - margin) / Math.abs(sin) : Number.POSITIVE_INFINITY;
+    const maxRadiusX =
+      Math.abs(cos) > 1e-4
+        ? (cx - margin) / Math.abs(cos)
+        : Number.POSITIVE_INFINITY;
+    const maxRadiusY =
+      Math.abs(sin) > 1e-4
+        ? (cy - margin) / Math.abs(sin)
+        : Number.POSITIVE_INFINITY;
     const markerRadius = Math.min(radius, maxRadiusX, maxRadiusY);
-    marker.style.left = `${cx + cos * markerRadius}px`;
-    marker.style.top = `${cy + sin * markerRadius}px`;
-    marker.style.opacity = String(opacity);
+    return {
+      left: cx + cos * markerRadius,
+      top: cy + sin * markerRadius,
+      opacity: String(opacity),
+    };
   }
 
   /** Update the cached effect geometry only when camera distance or viewport changes. */
   _renderEffectLayers(cx, cy, radius, rayInnerRadius) {
     const outlineKey = `${cx}:${cy}:${radius}`;
     if (outlineKey !== this._outlineRenderKey) {
-      this._ringOutline.style.display = '';
-      this._ringOutline.style.left = `${cx - radius}px`;
-      this._ringOutline.style.top = `${cy - radius}px`;
-      this._ringOutline.style.width = `${radius * 2}px`;
-      this._ringOutline.style.height = `${radius * 2}px`;
+      this._present({
+        outline: {
+          hidden: false,
+          left: cx - radius,
+          top: cy - radius,
+          width: radius * 2,
+          height: radius * 2,
+        },
+      });
       this._outlineRenderKey = outlineKey;
     }
 
     const sunKey = `${outlineKey}:${Math.round(rayInnerRadius)}`;
     if (sunKey !== this._sunRenderKey) {
-      this._sunCtx.clearRect(0, 0, this._sunCanvas.width, this._sunCanvas.height);
+      this._sunCtx.clearRect(
+        0,
+        0,
+        this._sunCanvas.width,
+        this._sunCanvas.height,
+      );
       drawSunRays(this._sunCtx, cx, cy, radius, rayInnerRadius, 0);
       drawTaperedArc(this._sunCtx, cx, cy, radius, 0, '222, 190, 89', 0.56);
       this._sunRenderKey = sunKey;
     }
 
     if (outlineKey !== this._moonRenderKey) {
-      this._moonCtx.clearRect(0, 0, this._moonCanvas.width, this._moonCanvas.height);
+      this._moonCtx.clearRect(
+        0,
+        0,
+        this._moonCanvas.width,
+        this._moonCanvas.height,
+      );
       drawMoonHaze(this._moonCtx, cx, cy, radius, 0);
       drawTaperedArc(this._moonCtx, cx, cy, radius, 0, '48, 201, 229', 0.42);
       this._moonRenderKey = outlineKey;
@@ -612,23 +803,31 @@ export class CelestialRing {
 
   /** Per-frame camera projection with GPU-composited cached effect layers. */
   _draw() {
-    if (!this.enabled || !this._sunCtx || !this._moonCtx) return;
+    // A ring the store no longer shows has handed its overlay to a later one.
+    if (!this.enabled || !this._shown()) return;
+    // Without its canvases (no view rendered them) the ring still tracks
+    // whether the globe is framed, so it turns itself off as before.
+    const painted = !!(this._sunCtx && this._moonCtx);
     const now = performance.now();
     if (now < this._nextDrawAt) return;
     this._nextDrawAt = now + 1000 / CELESTIAL_MAX_FRAME_RATE;
-    const canvas = this.viewer.scene.canvas;
+    const canvas = this._canvas();
     const width = canvas.clientWidth || canvas.width;
     const height = canvas.clientHeight || canvas.height;
     if (!(width > 0 && height > 0)) return;
-    this._resize(width, height);
+    if (painted) this._resize(width, height);
 
     const disc = this._projectedEarthDisc(width, height);
     const wasVisible = this.visible;
-    const nextVisible = disc ? isFullGlobeInsideKeyhole(disc, wasVisible) : false;
+    const nextVisible = disc
+      ? isFullGlobeInsideKeyhole(disc, wasVisible)
+      : false;
     this.visible = nextVisible;
-    this._root.classList.toggle('visible', nextVisible);
-    this._root.dataset.globeVisible = String(nextVisible);
-    this._root.dataset.ephemerisUpdates = String(this._ephemerisUpdateCount);
+    this._present({
+      visible: nextVisible,
+      globeVisible: String(nextVisible),
+      ephemerisUpdates: String(this._ephemerisUpdateCount),
+    });
     if (!nextVisible || !disc) {
       this._clear();
       this._debug = { enabled: true, visible: false, disc };
@@ -637,20 +836,23 @@ export class CelestialRing {
     }
 
     if (!wasVisible) this._ephemerisDirty = true;
+    if (!painted) {
+      this._debug = { enabled: true, visible: true, disc };
+      return;
+    }
 
-    const time = Cesium.JulianDate.now();
-    if (!this._updateEphemeris(time)) return;
-    this._root.dataset.ephemerisUpdates = String(this._ephemerisUpdateCount);
-    const camera = this.viewer.camera;
+    if (!this._updateEphemeris(skyTime())) return;
+    this._present({ ephemerisUpdates: String(this._ephemerisUpdateCount) });
+    const pose = cameraOf(this.viewer).pose();
     const sunProjection = celestialScreenAngle(
-      Cesium.Cartesian3.dot(this._sunFixed, camera.rightWC),
-      Cesium.Cartesian3.dot(this._sunFixed, camera.upWC),
-      this._sunAngle
+      dot(this._sunFixed, pose.right),
+      dot(this._sunFixed, pose.up),
+      this._sunAngle,
     );
     const moonProjection = celestialScreenAngle(
-      Cesium.Cartesian3.dot(this._moonFixed, camera.rightWC),
-      Cesium.Cartesian3.dot(this._moonFixed, camera.upWC),
-      this._moonAngle
+      dot(this._moonFixed, pose.right),
+      dot(this._moonFixed, pose.up),
+      this._moonAngle,
     );
     if (sunProjection.stable) this._sunAngle = sunProjection.angle;
     if (moonProjection.stable) this._moonAngle = moonProjection.angle;
@@ -660,28 +862,43 @@ export class CelestialRing {
     const cx = width * 0.5;
     const cy = height * 0.5;
     const radius = disc.keyholeRadius - RING_INSET_PX;
-    const rayInnerRadius = Math.min(radius - 12, disc.earthRadius + Math.max(38, radius * 0.065));
+    const rayInnerRadius = Math.min(
+      radius - 12,
+      disc.earthRadius + Math.max(38, radius * 0.065),
+    );
     this._renderEffectLayers(cx, cy, radius, rayInnerRadius);
-    this._sunCanvas.style.transform = `rotate(${this._sunAngle}rad)`;
-    this._sunCanvas.style.opacity = String(this._sunOpacity);
-    this._moonCanvas.style.transform = `rotate(${this._moonAngle}rad)`;
-    this._moonCanvas.style.opacity = String(this._moonOpacity);
 
     // Markers sit inside the illuminated band rather than straddling its outer
     // stroke. Near conjunction (such as a new moon), keep the true bearings but
     // move the moon into a second radial lane so both bodies remain legible.
     const markerRadius = radius - MARKER_INSET_PX;
-    const markersCollide = circularAngleDistance(this._sunAngle, this._moonAngle)
-      < MARKER_COLLISION_ANGLE;
-    this._positionMarker(this._sunMarker, cx, cy, markerRadius, this._sunAngle, this._sunOpacity);
-    this._positionMarker(
-      this._moonMarker,
-      cx,
-      cy,
-      markerRadius - (markersCollide ? COLLIDING_MARKER_EXTRA_INSET_PX : 0),
-      this._moonAngle,
-      this._moonOpacity
-    );
+    const markersCollide =
+      circularAngleDistance(this._sunAngle, this._moonAngle) <
+      MARKER_COLLISION_ANGLE;
+    this._present({
+      sun: {
+        transform: `rotate(${this._sunAngle}rad)`,
+        opacity: String(this._sunOpacity),
+      },
+      moon: {
+        transform: `rotate(${this._moonAngle}rad)`,
+        opacity: String(this._moonOpacity),
+      },
+      sunMarker: this._markerPosition(
+        cx,
+        cy,
+        markerRadius,
+        this._sunAngle,
+        this._sunOpacity,
+      ),
+      moonMarker: this._markerPosition(
+        cx,
+        cy,
+        markerRadius - (markersCollide ? COLLIDING_MARKER_EXTRA_INSET_PX : 0),
+        this._moonAngle,
+        this._moonOpacity,
+      ),
+    });
     this._debug = {
       enabled: true,
       visible: true,
@@ -698,17 +915,28 @@ export class CelestialRing {
 
   /** Read-only geometry snapshot for browser QA. */
   getDebugState() {
-    return this._debug ? { ...this._debug, disc: this._debug.disc ? { ...this._debug.disc } : null } : null;
+    return this._debug
+      ? {
+          ...this._debug,
+          disc: this._debug.disc ? { ...this._debug.disc } : null,
+        }
+      : null;
   }
 
-  /** Detach the render hook and remove all overlay DOM. */
+  /** Detach the render hook and withdraw the overlay. */
   destroy() {
     if (this._ephemerisTimer) {
       clearInterval(this._ephemerisTimer);
       this._ephemerisTimer = null;
     }
+    this._unsubscribeWorldTime?.();
+    this._unsubscribeWorldTime = null;
     if (this._removePostRender) this._removePostRender();
     this._removePostRender = null;
-    this._root?.remove();
+    if (this._shown()) {
+      this._store.connect(null);
+      this._store.publish(null);
+    }
+    this._sunCanvas = this._sunCtx = this._moonCanvas = this._moonCtx = null;
   }
 }

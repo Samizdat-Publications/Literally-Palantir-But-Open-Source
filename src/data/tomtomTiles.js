@@ -1,9 +1,10 @@
 /**
- * @file Pure tile math + budget accounting for the TomTom traffic-flow proxy.
+ * @file Pure tile math for the TomTom traffic-flow proxy; budget helpers are
+ * re-exported from `./tileBudget.js`.
  *
  * Shared by the `/api/tomtom` vite plugin (server-side: coordinate validation,
- * daily budget governor) and `src/data/flowTiles.js` (client-side: which tiles
- * cover the current traffic fetch bounds). Zero dependencies, Cesium-free, so
+ * daily budget governor) and `src/layers/traffic/flowSource.js` (client-side: which tiles
+ * cover the current traffic fetch bounds). No external dependencies, Cesium-free, so
  * both sides can unit-test against it with node:test.
  *
  * Slippy scheme: standard Web Mercator XYZ, y grows southward
@@ -26,11 +27,26 @@ const MERCATOR_LAT_LIMIT = 85.05112878;
  * @param {number} z - Zoom level; integer within [MIN_TILE_ZOOM, MAX_TILE_ZOOM].
  * @param {number} x - Tile column; integer within [0, 2^z - 1].
  * @param {number} y - Tile row; integer within [0, 2^z - 1].
+ * @param {{minZoom?: number, maxZoom?: number}} [bounds] Supported source zooms.
  * @returns {boolean} True when the coordinate is a fetchable tile.
  */
-export function isValidTileCoord(z, x, y) {
-  if (!Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y)) return false;
-  if (z < MIN_TILE_ZOOM || z > MAX_TILE_ZOOM) return false;
+export function isValidTileCoord(
+  z,
+  x,
+  y,
+  { minZoom = MIN_TILE_ZOOM, maxZoom = MAX_TILE_ZOOM } = {},
+) {
+  if (!Number.isInteger(z) || !Number.isInteger(x) || !Number.isInteger(y))
+    return false;
+  if (
+    !Number.isInteger(minZoom) ||
+    !Number.isInteger(maxZoom) ||
+    minZoom < 0 ||
+    maxZoom > 30 ||
+    minZoom > maxZoom
+  )
+    return false;
+  if (z < minZoom || z > maxZoom) return false;
   const n = 2 ** z;
   return x >= 0 && x < n && y >= 0 && y < n;
 }
@@ -47,11 +63,14 @@ export function isValidTileCoord(z, x, y) {
  */
 export function lonLatToTile(lon, lat, z) {
   const n = 2 ** z;
-  const clampedLat = Math.max(-MERCATOR_LAT_LIMIT, Math.min(MERCATOR_LAT_LIMIT, lat));
+  const clampedLat = Math.max(
+    -MERCATOR_LAT_LIMIT,
+    Math.min(MERCATOR_LAT_LIMIT, lat),
+  );
   const latRad = (clampedLat * Math.PI) / 180;
   const x = Math.floor(((lon + 180) / 360) * n);
   const y = Math.floor(
-    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
+    ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n,
   );
   return {
     x: Math.max(0, Math.min(n - 1, x)),
@@ -70,7 +89,8 @@ export function lonLatToTile(lon, lat, z) {
 export function tileToBBox(z, x, y) {
   const n = 2 ** z;
   const lonAt = (col) => (col / n) * 360 - 180;
-  const latAt = (row) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * row) / n))) * 180) / Math.PI;
+  const latAt = (row) =>
+    (Math.atan(Math.sinh(Math.PI * (1 - (2 * row) / n))) * 180) / Math.PI;
   return {
     west: lonAt(x),
     east: lonAt(x + 1),
@@ -112,41 +132,7 @@ export function tilesForBounds(bounds, zoom = 12, { maxTiles = 64 } = {}) {
 // ─── Daily budget accounting ───────────────────────────────
 
 /**
- * UTC calendar-day key for budget bucketing.
- *
- * @param {number} [epochMs=Date.now()] - Timestamp in ms.
- * @returns {string} 'YYYY-MM-DD' in UTC.
+ * Re-exported from `./tileBudget.js`, which keyed tile proxies share. The
+ * traffic provider and its tests keep one import for tile math and budget.
  */
-export function utcDayKey(epochMs = Date.now()) {
-  return new Date(epochMs).toISOString().slice(0, 10);
-}
-
-/**
- * Normalize a persisted budget state against today's UTC day key.
- * Rolls the counter to zero on day change; replaces missing/corrupt state.
- * Returns the SAME object when it is already valid for `dayKey` (cheap to
- * call on every request).
- *
- * @param {{date:string, count:number}|null|undefined} state - Persisted state.
- * @param {string} dayKey - Today's UTC day key (from `utcDayKey`).
- * @returns {{date:string, count:number}} Valid state for `dayKey`.
- */
-export function normalizeBudget(state, dayKey) {
-  const valid = Boolean(state)
-    && state.date === dayKey
-    && Number.isFinite(state.count)
-    && state.count >= 0;
-  return valid ? state : { date: dayKey, count: 0 };
-}
-
-/**
- * Whether the daily soft cap has been reached.
- *
- * @param {{count:number}} state - Normalized budget state.
- * @param {number} limit - Daily tile budget; non-positive/invalid never blocks.
- * @returns {boolean} True when `count >= limit`.
- */
-export function isOverBudget(state, limit) {
-  if (!Number.isFinite(limit) || limit <= 0) return false;
-  return state.count >= limit;
-}
+export { utcDayKey, normalizeBudget, isOverBudget } from './tileBudget.js';

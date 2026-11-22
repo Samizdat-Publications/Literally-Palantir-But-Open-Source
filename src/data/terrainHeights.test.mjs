@@ -1,5 +1,5 @@
 // src/data/terrainHeights.test.mjs — batched, cached client terrain-height
-// resolver.
+// resolver (docs/plans/2026-07-05-entity-height-datum-fix.md Task 3).
 //
 // Locks the module's public interface (Task 5/6 call it verbatim):
 //   resolveEllipsoidalGround(coords: [{lat, lon, sourceOrthometricM?}])
@@ -19,10 +19,11 @@ import assert from 'node:assert/strict';
 import {
   resolveEllipsoidalGround,
   cachedEllipsoidalGround,
+  cachedRealEllipsoidalGround,
 } from './terrainHeights.js';
 
 const AUSTIN = { lat: 30.2672, lon: -97.7431 };
-const AUSTIN_GEOID_N = -26.9; // Cross-checked against Re:Earth reference data.
+const AUSTIN_GEOID_N = -26.9; // docs/plans/2026-07-05-entity-height-datum-fix.md verified facts
 
 /** Installs a fake fetch for the duration of `fn`, restoring the original after. */
 async function withFakeFetch(fakeFetch, fn) {
@@ -79,7 +80,7 @@ test('resolveEllipsoidalGround: happy path maps results IN ORDER', async () => {
   assert.ok(capturedUrl.includes('points='));
 });
 
-test('resolveEllipsoidalGround: a 300-point input issues exactly 2 fetches (chunked at <=200/request) AND preserves order across the chunk boundary', async () => {
+test('resolveEllipsoidalGround: a 300-point input issues exactly 5 fetches (chunked at <=64/request) AND preserves order across the chunk boundary', async () => {
   // Each coord carries a DISTINGUISHABLE lat/lon derived from its index so
   // the oracle below can be an independent function of the point's INPUT
   // identity — not an echo of whatever the request happened to send. This is
@@ -119,11 +120,10 @@ test('resolveEllipsoidalGround: a 300-point input issues exactly 2 fetches (chun
     async () => {
       const out = await resolveEllipsoidalGround(coords);
       assert.equal(out.length, 300);
-      // Positional correctness at and across the chunk boundary (chunk 1 =
-      // [0,199], chunk 2 = [200,299]): each output must equal the oracle of
+      // Positional correctness across every chunk boundary: outputs equal the oracle of
       // its OWN input coord. The module rounds to 5dp before sending, so
       // compare against the oracle of the rounded coord to stay exact.
-      for (const k of [0, 1, 199, 200, 299]) {
+      for (let k = 0; k < coords.length; k += 1) {
         const lat = Number(coords[k].lat.toFixed(5));
         const lon = Number(coords[k].lon.toFixed(5));
         assert.equal(
@@ -135,9 +135,10 @@ test('resolveEllipsoidalGround: a 300-point input issues exactly 2 fetches (chun
       }
     }
   );
-  assert.equal(fetchCount, 2, `expected 2 fetches for 300 points at <=200/chunk, got ${fetchCount}`);
+  assert.equal(fetchCount, 5);
+  assert.deepEqual(chunkSizes, [64, 64, 64, 64, 44]);
   for (const size of chunkSizes) {
-    assert.ok(size <= 200, `chunk size ${size} exceeds the 200-point ceiling`);
+    assert.ok(size <= 64, `chunk size ${size} exceeds the 64-point ceiling`);
   }
   assert.equal(
     chunkSizes.reduce((a, b) => a + b, 0),
@@ -349,4 +350,60 @@ test('resolveEllipsoidalGround: an empty input array resolves to an empty array 
     }
   );
   assert.equal(fetchCount, 0);
+});
+
+test('resolveEllipsoidalGround: null and string heights cannot become real zeroes', async () => {
+  for (const [index, value] of [null, '', '0'].entries()) {
+    await withFakeFetch(
+      async () => ({ ok: true, json: async () => ({ results: [{ ellipsoid: value }] }) }),
+      async () => {
+        const out = await resolveEllipsoidalGround([{ lat: 11 + index, lon: 41 }]);
+        assert.equal(out[0].source, 'geoid-fallback');
+      }
+    );
+  }
+});
+
+test('resolveEllipsoidalGround: a 502 keeps the real heights it carries and falls back only for the rest', async () => {
+  const coords = [
+    { lat: 62.001, lon: -150.001, sourceOrthometricM: 10 },
+    { lat: 62.002, lon: -150.002, sourceOrthometricM: 10 },
+    { lat: 62.003, lon: -150.003, sourceOrthometricM: 10 },
+  ];
+  await withFakeFetch(
+    async () => ({
+      ok: false,
+      status: 502,
+      json: async () => ({
+        error: 'terrain heights fetch failed and no cache available for every point',
+        partial: [{ ellipsoid: 412.5 }, null, { ellipsoid: 'x' }],
+      }),
+    }),
+    async () => {
+      const out = await resolveEllipsoidalGround(coords);
+      assert.deepEqual(out[0], { ellipsoid: 412.5, source: 'reearth' });
+      assert.equal(out[1].source, 'geoid-fallback');
+      assert.equal(out[2].source, 'geoid-fallback', 'a non-numeric height is not real');
+    }
+  );
+  assert.equal(cachedRealEllipsoidalGround(62.001, -150.001), 412.5);
+  assert.equal(cachedRealEllipsoidalGround(62.002, -150.002), null);
+});
+
+test('resolveEllipsoidalGround: a partial list of the wrong length is ignored', async () => {
+  const coords = [
+    { lat: 63.001, lon: -151.001 },
+    { lat: 63.002, lon: -151.002 },
+  ];
+  await withFakeFetch(
+    async () => ({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: 'x', partial: [{ ellipsoid: 7 }] }),
+    }),
+    async () => {
+      const out = await resolveEllipsoidalGround(coords);
+      assert.deepEqual(out.map((r) => r.source), ['geoid-fallback', 'geoid-fallback']);
+    }
+  );
 });

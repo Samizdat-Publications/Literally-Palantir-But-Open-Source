@@ -1,3 +1,4 @@
+import { readLayerSource } from '../testSupport/readLayerSource.mjs';
 // src/data/tr3bRegistry.test.mjs
 // TR-3B conversion Easter egg: registry state, sprite-variant selection,
 // class-label override, and the render-path invariants that keep a converted
@@ -32,6 +33,7 @@ import militaryFlightsLayer, {
 import { findCompatibleHistoryIndex } from './militaryAwareness.js';
 import { createGevActionRunner } from '../voice/gevActions.js';
 import { ANALYST_LAYERS, createAnalystEngine } from './analystEngine.js';
+import { readEntityRecord, withEntityRecord } from './entityRecords.js';
 
 /** Strip block and line comments so source pins scan CODE, not prose. */
 function stripComments(source) {
@@ -148,7 +150,7 @@ test('a conversion survives a poll refresh, in both the billboard and the tracke
   const icao24 = 'a1b2c3';
   setTr3b(icao24, true);
 
-  const entity = { gevLabelModel: { title: 'OLD', details: [] } };
+  const entity = withEntityRecord({}, { labelModel: { title: 'OLD', details: [] } });
   const billboard = {
     position: Cesium.Cartesian3.fromDegrees(-97.7, 30.2, 9_000),
     color: Cesium.Color.WHITE,
@@ -162,8 +164,8 @@ test('a conversion survives a poll refresh, in both the billboard and the tracke
   _setTrackedFlightRefreshStateForTest({
     icao24,
     entity,
-    billboard,
-    billboardCollection: { show: false, remove() {} },
+    icon: billboard,
+    iconLayer: { show: false, remove() {} },
     viewer,
     meta: {
       callsign: 'OLD1',
@@ -188,7 +190,7 @@ test('a conversion survives a poll refresh, in both the billboard and the tracke
   const realFetch = globalThis.fetch;
   const nowSec = Math.floor(Date.now() / 1000);
   globalThis.fetch = async (url) => {
-    if (!String(url).startsWith('/api/opensky')) {
+    if (!String(url).startsWith('/api/flights')) {
       return { ok: true, status: 200, json: async () => ({ ac: [] }) };
     }
     return {
@@ -211,11 +213,11 @@ test('a conversion survives a poll refresh, in both the billboard and the tracke
     assert.equal(billboard.image, aircraftIcon('tr3b'),
       'the poll reconciler re-images through the TR-3B resolver, not the raw class');
     // Live telemetry keeps flowing; only the class label is the operator's fiction.
-    assert.match(entity.gevLabelModel.title, /^DAL123 · FL350 · 486 kts$/);
-    assert.deepEqual(entity.gevLabelModel.details.slice(0, 1), ['TR-3B'],
+    assert.match(readEntityRecord(entity)?.labelModel.title, /^DAL123 · FL350 · 486 kts$/);
+    assert.deepEqual(readEntityRecord(entity)?.labelModel.details.slice(0, 1), ['TR-3B'],
       'the tracked card class line reports TR-3B, replacing operator/type');
     assert.equal(
-      [entity.gevLabelModel.title, ...entity.gevLabelModel.details].join(' · ').includes('Southwest'),
+      [readEntityRecord(entity)?.labelModel.title, ...readEntityRecord(entity)?.labelModel.details].join(' · ').includes('Southwest'),
       false,
       'the real operator is not shown alongside the TR-3B classification',
     );
@@ -227,42 +229,44 @@ test('a conversion survives a poll refresh, in both the billboard and the tracke
 
 test('both flight layers keep a converted contact 2D and visible (render invariants)', async () => {
   for (const name of ['flights.js', 'militaryFlights.js']) {
-    const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
+    const source = readLayerSource(new URL(`./${name}`, import.meta.url));
 
     // 1. The 3D model handoff is SUPPRESSED for a converted contact — there is
-    //    no TR-3B GLB, so the triangle billboard stays the visual.
-    assert.match(source, /modelEligible\.has\(icao24\) && !isTr3b\(icao24\)/,
+    //    no TR-3B GLB, so the triangle icon stays the visual.
+    assert.match(source, /for \(const icao24 of modelEligible\) \{\s*if \(isTr3b\(icao24\)\) continue;/,
       `${name}: fleet model handoff skips converted contacts`);
-    // The tracked regime became default-on and camera-distance driven
-    // (2026-08-19), so the suppression moved from a conjunct on
-    // `_modelRegimeActive()` to an explicit early return. The invariant is
-    // unchanged: a converted contact never reaches the model handoff.
-    assert.match(source, /if \(!_trackedIcao \|\| _cockpitContactMode \|\| isTr3b\(_trackedIcao\)\) \{/,
+    // The tracked regime's suppression is an explicit early return: a
+    // converted contact never reaches the model handoff.
+    assert.match(source, /if\s*\(\s*!(?:flightState\.)?_trackedIcao\s*\|\|\s*(?:flightState\.)?_cockpitContactMode\s*\|\|\s*isTr3b\(\s*(?:flightState\.)?_trackedIcao,?\s*\),?\s*\)\s*(?:\{|return false;)/,
       `${name}: the standalone tracked model is suppressed for a converted contact`);
 
-    // 2. The billboard is never hidden by that suppression — it must keep
+    // 2. The icon is never hidden by that suppression — it must keep
     //    satisfying the getNearby/getDetectableObjects visibility guards, so a
     //    converted contact still works in Contacts and Cockpit.
-    assert.match(source, /if \(bb && id !== _trackedIcao\) bb\.show = true;|if \(modelled && id !== _trackedIcao\) modelled\.show = true;/,
-      `${name}: converting restores the billboard the model handoff had hidden`);
+    assert.match(source, /if\s*\(\s*flightState\._icons\?\.has\(id\)\s*&&\s*id\s*!==\s*flightState\._trackedIcao\s*\)\s*flightState\._icons\.setShown\(id, true\);/,
+      `${name}: converting restores the icon the model handoff had hidden`);
 
     // 3. Every aircraftIcon() CALL SITE routes through the kind resolver, so no
     //    refresh path (poll reconciler, raster swap, presentation, tracked
-    //    entity) can silently revert a conversion.
+    //    billboard) can silently revert a conversion. The tracked billboard's
+    //    sites share one helper; the fleet's live in aircraftIconLayer.js.
     const code = stripComments(source);
     const callSites = code.match(/aircraftIcon\(\s*[^;]*?\)/g) || [];
-    assert.equal(callSites.length >= 4, true, `${name}: expected the known aircraftIcon call sites`);
+    assert.equal(callSites.length >= 1, true, `${name}: expected the known aircraftIcon call sites`);
     for (const call of callSites) {
-      assert.match(call, /aircraftIcon\(\s*_iconKind\(/,
+      assert.match(call, /aircraftIcon\(\s*\s*(?:(?:parts\.)?rendering\.)?_iconKind\(\s*/,
         `${name}: ${call.replace(/\s+/g, ' ')} must resolve its sprite kind through _iconKind`);
     }
 
-    // 4. Orientation contract is untouched: still a screen-projected rotation
-    //    with alignedAxis ZERO, and no new per-frame CallbackProperty.
-    assert.match(source, /alignedAxis: Cesium\.Cartesian3\.ZERO/, `${name}: alignedAxis stays ZERO`);
-    assert.doesNotMatch(source, /isTr3b[\s\S]{0,200}new Cesium\.CallbackProperty/,
+    // 4. Orientation contract is untouched: the tracked billboard is still a
+    //    screen-rotated icon, and no per-frame CallbackProperty is added.
+    assert.doesNotMatch(source, /new Cesium\.CallbackProperty/,
       `${name}: the Easter egg adds no per-frame CallbackProperty`);
   }
+  const tracked = stripComments(
+    await readFile(new URL('./trackedAircraftIcon.js', import.meta.url), 'utf8'),
+  );
+  assert.match(tracked, /rotationMode: 'screen'/, 'the tracked billboard rotates in screen space');
 });
 
 test('conversions are session-scoped and no lifecycle path clears them', async () => {
@@ -270,8 +274,8 @@ test('conversions are session-scoped and no lifecycle path clears them', async (
   // personally clicked, and re-tracking the same aircraft after a layer restart
   // should still show the triangle. Only a page reload resets it — so no
   // production code may clear the registry.
-  for (const name of ['flights.js', 'militaryFlights.js', '../ui.js']) {
-    const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
+  for (const name of ['flights.js', 'militaryFlights.js', '../ui/applicationShell.js']) {
+    const source = readLayerSource(new URL(`./${name}`, import.meta.url));
     assert.doesNotMatch(source, /clearTr3bRegistry/,
       `${name}: teardown must not clear session conversions`);
   }
@@ -296,19 +300,19 @@ test('conversions are session-scoped and no lifecycle path clears them', async (
   _setTrackedFlightRefreshStateForTest({
     icao24,
     entity: null,
-    billboard: {
+    icon: {
       position: Cesium.Cartesian3.fromDegrees(-97.7, 30.2, 9_000),
       color: Cesium.Color.WHITE,
       image: aircraftIcon('tr3b'),
       show: true,
     },
-    billboardCollection: { show: false, remove() {} },
+    iconLayer: { show: false, remove() {} },
     viewer,
     tracked: false,
     meta: { callsign: 'OLD1', altitude: 9_000, klass: 'airliner', rawLat: 30.2, rawLon: -97.7 },
   });
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => (String(url).startsWith('/api/opensky')
+  globalThis.fetch = async (url) => (String(url).startsWith('/api/flights')
     ? { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ time: 0, states: [] }) }
     : { ok: true, status: 200, json: async () => ({ ac: [] }) });
   try {
@@ -406,16 +410,18 @@ test('a converted contact never consumes a 3D model CAP SLOT', async () => {
   // in the fleet tick (no seam to drive headlessly), so this asserts the guard's
   // POSITION rather than replaying the four-pass selection.
   for (const name of ['flights.js', 'militaryFlights.js']) {
-    const source = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
+    const source = readLayerSource(new URL(`./${name}`, import.meta.url));
     // Anchor on the MODEL-eligibility loop (keepDistSq), not the unrelated
     // ambient-enrichment candidate loop that also builds a `cand`.
-    const loop = /const cand = \[\];\s*\n\s*for \(const \[icao, bb\] of _billboards\)[\s\S]*?cand\.push\(/.exec(source)?.[0];
+    const loop = /const\s*cand\s*=\s*\[\];\s*\n\s*for\s*\(const icao of icons\.ids\(\)\)[\s\S]*?cand\.push\(\s*/.exec(source)?.[0];
     assert.ok(loop, `${name}: the model-eligibility candidate loop is present`);
     assert.match(loop, /keepDistSq/, `${name}: matched the model-eligibility loop`);
     assert.match(loop, /if \(isTr3b\(icao\)\) continue;/,
       `${name}: converted contacts are dropped BEFORE entering the capped candidate list`);
-    // ...and the cap really is applied to that list, so a dropped candidate is a freed slot.
-    assert.match(source, /modelEligible\.size >= cap/,
+    // ...and the cap really is applied to that list, so a dropped candidate is a
+    // freed slot. The four-pass selection itself is the shared
+    // selectModelEligible (behavior-tested in modelEligibility.test.mjs).
+    assert.match(source, /modelEligible\s*=\s*selectModelEligible\(\s*cand,\s*\{\s*cap,/,
       `${name}: the cap bounds the candidate-derived eligible set`);
   }
 });
@@ -437,6 +443,7 @@ test('cockpit class filter matches a converted contact end to end', async () => 
   const runner = createGevActionRunner({
     viewer: {
       clock: { onTick: { addEventListener: () => () => {} } },
+      canvas: { addEventListener() {}, removeEventListener() {} },
       scene: { canvas: { addEventListener() {}, removeEventListener() {} } },
       camera: { moveEnd: { addEventListener() {} } },
     },
@@ -458,12 +465,12 @@ test('cockpit class filter matches a converted contact end to end', async () => 
   const seed = () => _setTrackedFlightRefreshStateForTest({
     icao24,
     entity: null,
-    billboard: {
+    icon: {
       position: Cesium.Cartesian3.fromDegrees(-97.71, 30.21, 10_668),
       color: Cesium.Color.WHITE,
       show: true,
     },
-    billboardCollection: { show: true, remove() {} },
+    iconLayer: { show: true, remove() {} },
     viewer: { camera: { positionCartographic: null }, scene: {} },
     tracked: false,
     meta: { callsign: 'SWA696 ', altitude: 10_668, klass: 'airliner', onGround: false },
@@ -504,12 +511,12 @@ test('military records and detection cards agree with the conversion', () => {
   const seed = () => _setTrackedMilitaryRefreshStateForTest({
     icao24,
     entity: null,
-    billboard: {
+    icon: {
       position: Cesium.Cartesian3.fromDegrees(-97.71, 30.21, 10_668),
       color: Cesium.Color.WHITE,
       show: true,
     },
-    billboardCollection: { show: true, remove() {} },
+    iconLayer: { show: true, remove() {} },
     viewer: { camera: { positionCartographic: null }, scene: {} },
     tracked: false,
     meta: { callsign: 'RCH451', altitudeFt: 35_000, klass: 'quadjet', type: 'C-17A', onGround: false },

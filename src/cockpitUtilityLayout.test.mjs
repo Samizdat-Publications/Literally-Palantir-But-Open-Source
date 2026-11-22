@@ -54,6 +54,14 @@ test('a missing REC readout leaves the strip on the viewport ceiling', () => {
   assert.equal(top, 96);
 });
 
+test('the visible briefing card bounds the utility strip, collapsed or not', () => {
+  const { top, maxHeight } = resolveCockpitUtilityAnchor({
+    ...desktop, recBottom: 148.1, signalTop: 265.4,
+  });
+  assert.equal(Number((top + maxHeight).toFixed(1)), 257.4);
+  assert.equal(Number(maxHeight.toFixed(1)), 107);
+});
+
 test('keeps the collapsed sibling visible when both Cockpit utilities fit', () => {
   assert.deepEqual(resolveCockpitUtilityLayout({
     availableHeight: 320,
@@ -94,4 +102,3 @@ test('clamps malformed or short corridors to the minimum expanded height', () =>
     expandedMaxHeight: 120,
   });
 });
-

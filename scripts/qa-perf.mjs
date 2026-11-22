@@ -66,7 +66,7 @@
  * with nothing to place is not paint work and should not be honoured with a
  * frame. That is worldOverlay surgery — see the post-launch ledger entry
  * "world-overlay honours occluder churn as paint work" in
- * the performance contract in `docs/CURRENT-STATE.md`.
+ * the project roadmap.
  *
  * Usage: node scripts/qa-perf.mjs [--url http://localhost:4173]
  * Requires a running dev server. Headless; flags disable occlusion
@@ -310,7 +310,7 @@ try {
     countFrames(2_500),
     page.evaluate(() => new Promise((resolve) => setTimeout(() => {
       // Drive the actual sharpen slider: input event → handler →
-      // _applySharpenIntensity → governorRequestRender. Proves the wiring,
+      // _setSharpenIntensity → governorRequestRender. Proves the wiring,
       // not just the facade.
       const slider = document.getElementById('sharpen-intensity-slider');
       if (!slider) { resolve({ ok: false }); return; }

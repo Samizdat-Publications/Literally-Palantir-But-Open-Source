@@ -173,6 +173,18 @@ should land in the same change, because free-floating panels do get lost.
 
 # Open items
 
+> **Status after the 11/21/2026 upstream sync.** Several items below were
+> overtaken by upstream. Weather radar (#1) now exists upstream (Rain radar,
+> Satellite clouds, Lightning, Cyclones, with a history timeline). Saved places
+> (#2) should be re-scoped against upstream's director, stories and share-link
+> code (`src/director/`, `src/share/`) before building. Voice shedding (#3) and
+> the Gemini HUD summary (#5) were dropped with our old code; see FORK-NOTES.md.
+> The "Correction: panel dragging" decision above describes the pre-Vue UI and
+> no longer applies. Upstream also added timelines (weather history, transit
+> history, the director clock), so "The one real gap" should be re-checked
+> before the first sighting layer is designed. The "Keys" list at the bottom is
+> superseded by SETUP.md: no key is required any more.
+
 Carried forward. Nothing here is blocked on anything but a decision.
 
 | # | Item | Notes |

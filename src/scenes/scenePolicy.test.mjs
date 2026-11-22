@@ -1,17 +1,17 @@
+import { readLayerSource } from '../testSupport/readLayerSource.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
 import {
-  SCENE_EXCLUSIVITY_PROBE_LAYER_ID,
   SCENE_KEPT_SELECTION_PARAM_KEYS,
   SCENE_SELECTION_PARAM_PATTERN,
   SCENE_TRACKING_PARAM_KEYS,
   sceneLayerPlan,
-  sceneRequiresContextModeExit,
   stripSceneTrackingParams,
 } from './scenePolicy.js';
 import { SCENE_RECIPES } from './recipes.js';
+import { KEYHOLE_TOUR_RECIPES } from './keyholeTours.js';
 import { LAYER_STATE_REGISTRY } from '../data/layerState.js';
 
 /**
@@ -24,10 +24,10 @@ function sweepLayerParamKeys() {
   const dataDir = new URL('../data/', import.meta.url);
   for (const entry of fs.readdirSync(dataDir)) {
     if (!entry.endsWith('.js')) continue;
-    const source = fs.readFileSync(new URL(entry, dataDir), 'utf8');
+    const source = readLayerSource(new URL(entry, dataDir));
     // Every getParams() in this codebase is a plain object return; take the
     // body up to its closing brace and read the keys it publishes.
-    const body = source.match(/\n {2}getParams\(\)\s*\{[\s\S]*?\n {2}\},/);
+    const body = source.match(/\n\s+getParams\(\)\s*\{[\s\S]*?\n\s+\},/);
     if (!body) continue;
     // A key always follows `{` or `,` — which matches both the multi-line
     // returns and the single-line `return { passive: … }` form, while a
@@ -40,6 +40,7 @@ function sweepLayerParamKeys() {
 
 /** The layer registry as main.js builds it (src/main.js dataManager.register calls). */
 const REGISTERED = new Set([
+  'bhote-koshi-2026', 'bhote-koshi-locator',
   'flights', 'military', 'earthquakes', 'satellites', 'rocket-launches', 'traffic',
   'cctv', 'radio', 'bikeshare', 'ais-live-vessels', 'military-installations',
   'military-awareness', 'local-datacenters', 'local-dams',
@@ -175,50 +176,16 @@ test('the family pattern catches selection names the old sweep would have missed
   }
 });
 
-test('the exclusivity probe id is reserved — no real layer may claim it', () => {
-  // The probe asks a mode "would you refuse a layer you have no opinion
-  // about?". If a real layer ever took this id, the probe would be asking
-  // about a layer the mode DOES have an opinion on, and an isolating mode
-  // could read as non-isolating.
-  for (const entry of LAYER_STATE_REGISTRY) {
-    assert.notEqual(entry.id, SCENE_EXCLUSIVITY_PROBE_LAYER_ID);
-  }
-  assert.equal(REGISTERED.has(SCENE_EXCLUSIVITY_PROBE_LAYER_ID), false);
-  // Every real id is kebab-case; the sentinel deliberately is not.
-  for (const entry of LAYER_STATE_REGISTRY) {
-    assert.match(entry.id, /^[a-z][a-z0-9-]*$/, `${entry.id} breaks the layer-id convention`);
-  }
-  assert.doesNotMatch(SCENE_EXCLUSIVITY_PROBE_LAYER_ID, /^[a-z][a-z0-9-]*$/);
-});
-
-test('an isolating context mode must be exited before a shot applies', () => {
-  // Read off the shared guard, not a mode name: Space Missions refuses every
-  // enable outside its replay bundle, so a shot applied inside it is not the
-  // composition it describes.
-  assert.equal(sceneRequiresContextModeExit('space-missions'), true);
-  assert.equal(sceneRequiresContextModeExit('flights'), false);
-  assert.equal(sceneRequiresContextModeExit(null), false);
-  assert.equal(sceneRequiresContextModeExit(undefined), false);
-});
-
-test('shipped recipes touch only the layers they declare', () => {
-  // The equality below is the real guard: every id a recipe declares must
-  // survive sceneLayerPlan, which drops unregistered ids silently. A typo in a
-  // recipe is otherwise invisible — the layer just never gets set.
-  //
-  // The old form also capped this at 4, from when the app shipped four data
-  // layers. The demo tours deliberately declare every registered layer so they
-  // can turn the irrelevant ones OFF, which is what this module's own guidance
-  // asks for ("shots should declare the layers they want OFF"). The cap now
-  // tracks the registry instead of a literal.
+test('shipped recipes touch only their four declared layers', () => {
+  // KEYHOLE fork: its demo tours declare every baseline layer on purpose so a
+  // tour never inherits a heavy globe; keyholeTours.test.mjs covers them.
+  const keyholeTourIds = new Set(KEYHOLE_TOUR_RECIPES.map(({ id }) => id));
   for (const recipe of SCENE_RECIPES) {
+    if (keyholeTourIds.has(recipe.id)) continue;
     const declared = Object.entries(recipe.layers || {})
       .map(([id, enabled]) => [id, { enabled }]);
     const plan = sceneLayerPlan(Object.fromEntries(declared), REGISTERED);
     assert.equal(plan.length, Object.keys(recipe.layers || {}).length, recipe.id);
-    assert.ok(
-      plan.length <= REGISTERED.size,
-      `${recipe.id} should not reach beyond its declared layers`,
-    );
+    assert.ok(plan.length <= 4, `${recipe.id} should not reach beyond its declared layers`);
   }
 });

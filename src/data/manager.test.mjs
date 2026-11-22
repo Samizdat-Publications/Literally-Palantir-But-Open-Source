@@ -12,6 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DataLayerManager, layerFeedState } from './manager.js';
+import { presentLayerToggle } from '../ui/layerPanel.js';
 import {
   contextSnapshotLayerIds,
   shouldCaptureContextSession,
@@ -88,67 +89,6 @@ test('adopts settled visibility without re-running lifecycle work', async () => 
   assert.equal(events.at(-1)?.type, 'visibility');
   assert.equal(events.at(-1)?.adoptedFromSelection, true);
   assert.equal(manager.adoptLayerVisibility('flights', false, { origin: 'user' }), false);
-});
-
-test('renders ordinary layer rows without recreating a panel-hidden coordinator', async () => {
-  const originalDocument = globalThis.document;
-  const makeElement = () => {
-    const element = {
-      children: [],
-      className: '',
-      dataset: {},
-      textContent: '',
-      disabled: false,
-      attributes: {},
-      classList: {
-        toggle() {},
-      },
-      appendChild(child) { this.children.push(child); return child; },
-      addEventListener() {},
-      setAttribute(name, value) { this.attributes[name] = String(value); },
-      querySelector(selector) {
-        if (selector.startsWith('[data-layer-id="')) {
-          const id = selector.slice(16, -2);
-          return this.children.find((child) => child.dataset.layerId === id) || null;
-        }
-        const className = selector.startsWith('.') ? selector.slice(1) : '';
-        const visit = (node) => {
-          if (String(node.className).split(/\s+/).includes(className)) return node;
-          for (const child of node.children || []) {
-            const found = visit(child);
-            if (found) return found;
-          }
-          return null;
-        };
-        return visit(this);
-      },
-      set innerHTML(value) { if (value === '') this.children = []; },
-      get innerHTML() { return ''; },
-    };
-    return element;
-  };
-  globalThis.document = { createElement: makeElement };
-  const mgr = new DataLayerManager({});
-  const ordinary = makeSlowLayer('flights', { updateInterval: -1 });
-  const coordinator = makeSlowLayer('military-awareness', { updateInterval: -1 });
-  coordinator.module.showInTogglePanel = false;
-  mgr.register(ordinary.module);
-  mgr.register(coordinator.module);
-  const container = makeElement();
-
-  try {
-    mgr.buildTogglePanel(container);
-    assert.ok(container.querySelector('[data-layer-id="flights"]'));
-    assert.equal(container.querySelector('[data-layer-id="military-awareness"]'), null);
-    assert.equal(await mgr.setEnabled('military-awareness', true), true);
-    mgr._refreshTogglePanel();
-    assert.equal(container.querySelector('[data-layer-id="military-awareness"]'), null);
-    assert.equal(mgr.getAll().find(({ id }) => id === 'military-awareness').enabled, true);
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
 });
 
 test('clearSelectedLayers includes hidden coordinators and preserves newer dependency restoration', async () => {
@@ -1563,6 +1503,43 @@ test('waitForLayerSettled defers reconciliation until the captured queue complet
   await mgr.destroyAll();
 });
 
+test('waitForLayerIdle follows queued requests and gives up at its bound', async () => {
+  const mgr = new DataLayerManager({});
+  const gates = [];
+  const layer = makeSlowLayer('satellites', { updateInterval: 0 });
+  layer.module.enable = () => new Promise((resolve) => { gates.push(resolve); });
+  mgr.register(layer.module);
+  assert.equal(await mgr.waitForLayerIdle('satellites'), true, 'idle at once');
+  assert.equal(await mgr.waitForLayerIdle('unknown-layer'), true);
+
+  const first = mgr.setEnabled('satellites', true);
+  while (!gates.length) await new Promise((resolve) => setTimeout(resolve, 1));
+  let idle = null;
+  const waiting = mgr.waitForLayerIdle('satellites', { timeoutMs: 1000 })
+    .then((value) => { idle = value; });
+  // A request that joins the queue while waiting is waited for too.
+  const second = mgr.setEnabled('satellites', false);
+  gates[0]();
+  await Promise.all([first, second, waiting]);
+  assert.equal(idle, true);
+
+  // A queue that never drains returns false at the deadline or on abort.
+  const hung = mgr.setEnabled('satellites', true);
+  assert.equal(await mgr.waitForLayerIdle('satellites', { timeoutMs: 20 }), false);
+  const controller = new AbortController();
+  const aborted = mgr.waitForLayerIdle('satellites', { signal: controller.signal });
+  controller.abort();
+  assert.equal(await aborted, false);
+  assert.equal(
+    await mgr.waitForLayerIdle('satellites', { signal: controller.signal }),
+    false,
+    'an already aborted signal returns at once',
+  );
+  for (const release of gates) release();
+  await hung;
+  await mgr.destroyAll();
+});
+
 test('programmatic Context enables neither create nor replace a restoration snapshot', async () => {
   const mgr = new DataLayerManager({});
   const missions = makeSlowLayer('rocket-launches', { updateInterval: 0 });
@@ -1860,17 +1837,6 @@ test('layer metadata names degraded state instead of presenting an ordinary age'
 
 test('uncertain lifecycle state overrides ordinary feed status without disabling reconciliation', () => {
   const mgr = new DataLayerManager({});
-  const classes = new Map();
-  const attributes = new Map();
-  const button = {
-    classList: {
-      toggle(name, active) { classes.set(name, Boolean(active)); },
-    },
-    dataset: {},
-    disabled: false,
-    textContent: '',
-    setAttribute(name, value) { attributes.set(name, String(value)); },
-  };
   const layer = {
     name: 'Radio',
     source: 'Radio Browser',
@@ -1880,14 +1846,14 @@ test('uncertain lifecycle state overrides ordinary feed status without disabling
     stats: { count: 750, lastUpdate: Date.now() },
   };
 
-  mgr._syncToggleButton(button, layer);
+  const toggle = presentLayerToggle(layer);
 
-  assert.equal(button.textContent, 'UNCERTAIN');
-  assert.equal(button.dataset.feedState, 'uncertain');
-  assert.equal(button.disabled, false, 'the lifecycle toggle remains available to reconcile authority');
-  assert.equal(attributes.get('aria-label'), 'Radio: UNCERTAIN');
-  assert.equal(classes.get('lifecycle-uncertain'), true);
-  assert.equal(classes.get('feed-nominal'), false);
+  assert.equal(toggle.text, 'UNCERTAIN');
+  assert.equal(toggle.feedState, 'uncertain');
+  assert.equal(toggle.ariaDisabled, false, 'the lifecycle toggle remains available to reconcile authority');
+  assert.equal(toggle.ariaLabel, 'Radio: UNCERTAIN');
+  assert.equal(toggle.classes['lifecycle-uncertain'], true);
+  assert.equal(toggle.classes['feed-nominal'], false);
   assert.equal(
     mgr._buildMetaText(layer),
     'UNCERTAIN · Radio Browser · lifecycle state requires reconciliation',
@@ -1925,10 +1891,10 @@ test('pre-transition subscribers capture the exact enabled set before user chang
 
 test('absolute Context entry intent is excluded from its own pre-entry restore snapshot', async () => {
   const mgr = new DataLayerManager({});
-  const missions = makeSlowLayer('rocket-launches', { updateInterval: 0 });
-  const satellites = makeSlowLayer('satellites', { updateInterval: 0 });
-  mgr.register(missions.module);
-  mgr.register(satellites.module);
+  const contacts = makeSlowLayer('military-awareness', { updateInterval: 0 });
+  const flights = makeSlowLayer('flights', { updateInterval: 0 });
+  mgr.register(contacts.module);
+  mgr.register(flights.module);
   let snapshot = null;
   mgr.subscribe((change) => {
     if (shouldCaptureContextSession(change)) {
@@ -1940,13 +1906,13 @@ test('absolute Context entry intent is excluded from its own pre-entry restore s
     }
   });
 
-  await mgr.setEnabled('rocket-launches', true, { origin: 'user' });
+  await mgr.setEnabled('military-awareness', true, { origin: 'user' });
   assert.deepEqual([...snapshot], []);
-  await mgr.setEnabled('rocket-launches', false, { origin: 'user' });
+  await mgr.setEnabled('military-awareness', false, { origin: 'user' });
   await mgr.restoreEnabledLayerIds(snapshot, { origin: 'context-restore' });
 
-  assert.equal(mgr.isEnabled('rocket-launches'), false);
-  assert.equal(mgr.isEnabled('satellites'), false);
+  assert.equal(mgr.isEnabled('military-awareness'), false);
+  assert.equal(mgr.isEnabled('flights'), false);
   await mgr.destroyAll();
 });
 
@@ -2397,10 +2363,13 @@ test('a newer absolute intent aborts a hung guard-compensation instead of starvi
   removeGuard();
   // The newest intent must be able to abort the hung compensation and run.
   const pendingFinalOn = mgr.setEnabled('flights', true, { origin: 'user' });
+  let giveUpTimer;
   const finalOn = await Promise.race([
     pendingFinalOn,
-    new Promise((resolve) => setTimeout(() => resolve('starved'), 2000)),
-  ]);
+    new Promise((resolve) => {
+      giveUpTimer = setTimeout(() => resolve('starved'), 2000);
+    }),
+  ]).finally(() => clearTimeout(giveUpTimer));
   assert.notEqual(finalOn, 'starved', 'newest intent must not starve behind the compensation');
   assert.equal(compensationAborted, true, 'the hung compensation was aborted');
   assert.equal(await pendingBlockedOn, false, 'the guard-blocked request stays unfulfilled');
@@ -2450,10 +2419,13 @@ test('re-entrant setEnabled from a blocked-adoption listener supersedes the comp
   releaseFirstDisable();
 
   const blockedOn = await pendingBlockedOn;
+  let giveUpTimer;
   const reentrant = await Promise.race([
     (async () => reentrantResult === null ? 'never-fired' : await reentrantResult)(),
-    new Promise((resolve) => setTimeout(() => resolve('starved'), 2000)),
-  ]);
+    new Promise((resolve) => {
+      giveUpTimer = setTimeout(() => resolve('starved'), 2000);
+    }),
+  ]).finally(() => clearTimeout(giveUpTimer));
   await pendingOff;
   await mgr.waitForLayerSettled('flights');
   unsubscribe();
@@ -2722,379 +2694,136 @@ test('destroy settles an explicit refresh waiting behind invalidated periodic wo
   assert.equal(await destroy, true);
 });
 
-// ── Per-layer row controls (chips + color legend) ───────────────────────────
-// The satellites layer is the first consumer: a DENSE catalog chip and a class
-// legend rendered under its row. The manager owns the DOM and the param write;
-// the layer only declares what it wants, so the chip can never disagree with
-// the layer's real state.
-
-/** DOM double rich enough for the row-controls render path. */
-function makeControlElement() {
-  const element = {
-    children: [],
-    className: '',
-    dataset: {},
-    style: {},
-    attributes: {},
-    listeners: {},
-    textContent: '',
-    hidden: false,
-    disabled: false,
-    title: '',
-    type: '',
-    classList: { toggle() {} },
-    appendChild(child) { child.parent = this; this.children.push(child); return child; },
-    append(...nodes) { for (const n of nodes) n.parent = this; this.children.push(...nodes); },
-    replaceChildren(...nodes) { this.children = [...nodes]; },
-    remove() {
-      const siblings = this.parent?.children;
-      if (siblings) this.parent.children = siblings.filter((n) => n !== this);
-      // Browsers blur a node the moment it leaves the document. Modelling that
-      // is the whole point: it is exactly what in-place chip reconciliation
-      // exists to avoid, so a regression to rebuild-everything must fail here.
-      if (globalThis.document?.activeElement === this) globalThis.document.activeElement = null;
-    },
-    focus() { if (globalThis.document) globalThis.document.activeElement = this; },
-    addEventListener(name, handler) { this.listeners[name] = handler; },
-    setAttribute(name, value) { this.attributes[name] = String(value); },
-    closest(selector) {
-      const className = selector.slice(1);
-      return String(this.className).split(/\s+/).includes(className) ? this : null;
-    },
-    querySelector(selector) {
-      if (selector.startsWith('[data-layer-id="')) {
-        const id = selector.slice(16, -2);
-        return this.children.find((child) => child.dataset.layerId === id) || null;
-      }
-      const className = selector.startsWith('.') ? selector.slice(1) : '';
-      const visit = (node) => {
-        if (String(node.className).split(/\s+/).includes(className)) return node;
-        for (const child of node.children || []) {
-          const found = visit(child);
-          if (found) return found;
-        }
-        return null;
-      };
-      return visit(this);
-    },
-    set innerHTML(value) { if (value === '') this.children = []; },
-    get innerHTML() { return ''; },
-  };
-  return element;
-}
-
-/** Collect every node in a rendered subtree carrying `className`. */
-function collectByClass(node, className) {
-  const found = [];
-  const visit = (current) => {
-    if (String(current.className).split(/\s+/).includes(className)) found.push(current);
-    for (const child of current.children || []) visit(child);
-  };
-  visit(node);
-  return found;
-}
-
-/** A layer that declares a two-state chip plus a legend, like satellites. */
-function makeRowControlLayer() {
-  let mode = 'core';
-  return {
-    get mode() { return mode; },
-    module: {
-      id: 'satellites',
-      name: 'Satellites',
-      icon: '',
-      source: 'CelesTrak',
-      updateInterval: -1,
-      async init() {},
-      enable() {},
-      disable() {},
-      async update() {},
-      getStats() { return { count: 3, lastUpdate: Date.now() }; },
-      setParams(params) { if (params.catalog) mode = params.catalog; },
-      getParams() { return { catalog: mode }; },
-      getRowControls() {
-        const dense = mode === 'dense';
-        return {
-          chips: [{
-            id: 'catalog',
-            label: 'DENSE',
-            active: dense,
-            title: 'toggle the dense catalog',
-            params: { catalog: dense ? 'core' : 'dense' },
-          }],
-          legend: [
-            { klass: 'nav', label: 'NAV', color: '#4fd8ff', blurb: 'GNSS', count: 2 },
-            { klass: 'geo', label: 'GEO', color: '#c89bff', blurb: 'belt', count: 5 },
-          ],
-        };
-      },
-    },
-  };
-}
-
-test('a layer that declares row controls renders its chips and color legend', async () => {
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement };
+test('layer metadata shows a guidance prompt without reporting it as a fault', () => {
   const mgr = new DataLayerManager({});
-  const layer = makeRowControlLayer();
-  mgr.register(layer.module);
-  const container = makeControlElement();
-
-  try {
-    mgr.buildTogglePanel(container);
-    const row = container.querySelector('[data-layer-id="satellites"]');
-    const controls = row.querySelector('.data-toggle-controls');
-    assert.ok(controls, 'the row gained a controls block');
-    // Disabled layers stay quiet — no chip, no legend.
-    assert.equal(controls.hidden, true);
-
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    mgr._refreshTogglePanel();
-    assert.equal(controls.hidden, false);
-
-    const chips = collectByClass(controls, 'data-toggle-chip');
-    assert.equal(chips.length, 1);
-    assert.equal(chips[0].textContent, 'DENSE');
-    assert.equal(chips[0].dataset.chipId, 'catalog');
-    assert.equal(chips[0].attributes['aria-pressed'], 'false');
-    assert.equal(chips[0].title, 'toggle the dense catalog');
-
-    const swatches = collectByClass(controls, 'data-toggle-legend-swatch');
-    assert.deepEqual(swatches.map((s) => s.style.background), ['#4fd8ff', '#c89bff'],
-      'each legend swatch is painted the exact class color');
-    const items = collectByClass(controls, 'data-toggle-legend-item');
-    assert.deepEqual(items.map((i) => i.title), ['GNSS', 'belt']);
-    assert.equal(items.length, 2);
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
+  const text = mgr._buildMetaText({
+    enabled: true,
+    source: 'OpenStreetMap',
+    stats: { status: 'zoom-in', error: null, count: 0, statusMessage: 'Zoom in to search mapped installations' },
+  });
+  assert.match(text, /Zoom in to search mapped installations$/);
+  assert.doesNotMatch(text, /UNAVAILABLE|DEGRADED/);
 });
 
-test('clicking a row chip applies the params it declared and re-renders', async () => {
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement };
-  const mgr = new DataLayerManager({});
-  const layer = makeRowControlLayer();
-  mgr.register(layer.module);
-  const container = makeControlElement();
-
-  try {
-    mgr.buildTogglePanel(container);
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    const row = container.querySelector('[data-layer-id="satellites"]');
-    const controls = row.querySelector('.data-toggle-controls');
-    const chip = collectByClass(controls, 'data-toggle-chip')[0];
-
-    controls.listeners.click({ target: chip });
-    assert.equal(layer.mode, 'dense', 'the chip wrote the params it declared');
-    // setLayerParams refreshes the panel, so the chip already reflects the flip.
-    const afterOn = collectByClass(controls, 'data-toggle-chip')[0];
-    assert.equal(afterOn.attributes['aria-pressed'], 'true');
-    assert.equal(afterOn.className.includes('active'), true);
-
-    controls.listeners.click({ target: afterOn });
-    assert.equal(layer.mode, 'core', 'the chip toggles back rather than latching');
-    assert.equal(collectByClass(controls, 'data-toggle-chip')[0].attributes['aria-pressed'], 'false');
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
+test('refreshLayerStats reaches presentation through the bare lifecycle', async () => {
+  const { LayerLifecycle } = await import('./lifecycle.js');
+  const lifecycle = new LayerLifecycle({});
+  const changes = [];
+  lifecycle.subscribeActivity((change) => changes.push(change.type));
+  lifecycle.refreshLayerStats();
+  assert.deepEqual(changes, ['status']);
 });
 
-test('a click outside a chip is inert, and a throwing layer cannot blank the panel', async () => {
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement };
-  const warn = console.warn;
-  console.warn = () => {};
-  const mgr = new DataLayerManager({});
-  const layer = makeRowControlLayer();
-  mgr.register(layer.module);
-  const container = makeControlElement();
-
-  try {
-    mgr.buildTogglePanel(container);
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    const row = container.querySelector('[data-layer-id="satellites"]');
-    const controls = row.querySelector('.data-toggle-controls');
-
-    const legendItem = collectByClass(controls, 'data-toggle-legend-item')[0];
-    controls.listeners.click({ target: legendItem });
-    assert.equal(layer.mode, 'core', 'the legend is not a control');
-    controls.listeners.click({ target: { closest: () => null } });
-    assert.equal(layer.mode, 'core');
-
-    layer.module.getRowControls = () => { throw new Error('boom'); };
-    mgr._refreshTogglePanel();
-    assert.equal(controls.hidden, true, 'a throwing layer collapses to an empty block');
-    assert.ok(container.querySelector('[data-layer-id="satellites"]'), 'the row itself survives');
-  } finally {
-    console.warn = warn;
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
-});
-
-test('keyboard focus on a chip survives the refresh its own click triggers', async () => {
-  // _syncRowControls runs on EVERY panel refresh, including the one the chip's
-  // own click triggers. Rebuilding the button would blur it every time, so a
-  // keyboard user loses their place on activation.
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement, activeElement: null };
-  const mgr = new DataLayerManager({});
-  const layer = makeRowControlLayer();
-  mgr.register(layer.module);
-  const container = makeControlElement();
-
-  try {
-    mgr.buildTogglePanel(container);
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    const controls = container
-      .querySelector('[data-layer-id="satellites"]')
-      .querySelector('.data-toggle-controls');
-    const chip = collectByClass(controls, 'data-toggle-chip')[0];
-
-    chip.focus();
-    assert.equal(globalThis.document.activeElement, chip, 'the chip starts focused');
-
-    controls.listeners.click({ target: chip });
-    assert.equal(globalThis.document.activeElement, chip,
-      'activating the chip does not blur it');
-    assert.equal(collectByClass(controls, 'data-toggle-chip')[0], chip,
-      'the SAME button node is reused across the click-driven refresh');
-
-    mgr._refreshTogglePanel();
-    mgr._refreshTogglePanel();
-    assert.equal(globalThis.document.activeElement, chip,
-      'repeated refreshes never steal focus');
-    // Legend entries hold no focus, so they may be replaced — never duplicated.
-    assert.equal(collectByClass(controls, 'data-toggle-legend-item').length, 2);
-
-    // ...and a chip that genuinely goes away still releases focus.
-    layer.module.getRowControls = () => ({ chips: [], legend: [] });
-    mgr._refreshTogglePanel();
-    assert.equal(globalThis.document.activeElement, null);
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
-});
-
-test('an async layer pushes its own row refresh, and a busy chip refuses clicks', async () => {
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement };
-  const mgr = new DataLayerManager({});
-
-  let settled = false;
-  let writes = 0;
-  const module = {
-    id: 'satellites',
-    name: 'Satellites',
-    icon: '',
-    source: 'CelesTrak',
-    updateInterval: -1,
-    async init() {},
-    enable() {},
-    disable() {},
+test('refreshLayerStats(layerId) drops a tick failure the layer no longer reports', async () => {
+  const { LayerLifecycle } = await import('./lifecycle.js');
+  const lifecycle = new LayerLifecycle({});
+  let stats = { count: 0, error: 'Feed unavailable' };
+  lifecycle.register({
+    id: 'feed',
+    name: 'Feed',
+    getStats: () => stats,
     async update() {},
-    getStats() { return { count: 1, lastUpdate: Date.now() }; },
-    setParams() { writes += 1; },
-    getRowControls() {
-      return {
-        chips: [{
-          id: 'catalog',
-          label: settled ? 'DENSE' : 'DENSE ···',
-          active: settled,
-          busy: !settled,
-          disabled: !settled,
-          state: settled ? 'active' : 'loading',
-          title: 'x',
-          params: { catalog: 'core' },
-        }],
-        legend: [],
-      };
-    },
-    setRowControlsListener(fn) { module._listener = fn; },
-  };
-  mgr.register(module);
-  const container = makeControlElement();
+  });
+  const entry = lifecycle.layers.get('feed');
+  entry.enabled = true;
+  entry.initialized = true;
+  entry.managerRefreshError = 'Feed unavailable';
 
-  try {
-    mgr.buildTogglePanel(container);
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    assert.equal(typeof module._listener, 'function', 'the manager installed its listener');
+  lifecycle.refreshLayerStats('feed');
+  assert.equal(entry.managerRefreshError, 'Feed unavailable');
 
-    const controls = container
-      .querySelector('[data-layer-id="satellites"]')
-      .querySelector('.data-toggle-controls');
-    const chip = collectByClass(controls, 'data-toggle-chip')[0];
-    assert.equal(chip.textContent, 'DENSE ···');
-    assert.equal(chip.disabled, true);
-    assert.equal(chip.attributes['aria-busy'], 'true');
-    assert.equal(chip.attributes['aria-pressed'], 'false', 'busy is never reported as active');
-    assert.equal(chip.className.includes('chip-loading'), true);
-
-    controls.listeners.click({ target: chip });
-    assert.equal(writes, 0, 'a disabled chip is inert');
-
-    // The layer settles and pushes its own refresh — no panel poll involved.
-    settled = true;
-    module._listener();
-    assert.equal(chip.textContent, 'DENSE');
-    assert.equal(chip.disabled, false);
-    assert.equal(chip.attributes['aria-pressed'], 'true');
-    assert.equal(chip.attributes['aria-busy'], 'false');
-
-    controls.listeners.click({ target: chip });
-    assert.equal(writes, 1, 'the settled chip writes again');
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
+  stats = { count: 0 };
+  lifecycle.refreshLayerStats();
+  assert.equal(entry.managerRefreshError, 'Feed unavailable');
+  lifecycle.refreshLayerStats('feed');
+  assert.equal(entry.managerRefreshError, null);
 });
 
-test('a layer that surrenders its row controls hides the block entirely', async () => {
-  // Space Missions borrows the satellite layer with showPoints:false; the row
-  // must not advertise a legend for an empty sky or offer a chip whose write
-  // the dependency owner will silently revert.
-  const originalDocument = globalThis.document;
-  globalThis.document = { createElement: makeControlElement };
-  const mgr = new DataLayerManager({});
-  let surrendered = false;
-  const layer = makeRowControlLayer();
-  const inner = layer.module.getRowControls;
-  layer.module.getRowControls = () => (surrendered ? { chips: [], legend: [] } : inner());
-  mgr.register(layer.module);
-  const container = makeControlElement();
+test('periodic polls pause hidden, catch up once when due, and dispose visibility listeners', async (t) => {
+  const listeners = new Set();
+  const doc = {
+    hidden: false,
+    addEventListener: (_name, fn) => listeners.add(fn),
+    removeEventListener: (_name, fn) => listeners.delete(fn),
+  };
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 1000 });
+  const { LayerLifecycle } = await import('./lifecycle.js');
+  const manager = new LayerLifecycle({}, { visibilityTarget: doc });
+  const { module, calls } = makeSlowLayer('hidden-poll');
+  manager.register(module);
+  await manager.setEnabled('hidden-poll', true);
+  assert.equal(calls.update, 1);
+  doc.hidden = true;
+  t.mock.timers.tick(10000);
+  assert.equal(calls.update, 1);
+  assert.equal(await manager.refreshLayer('hidden-poll'), true);
+  assert.equal(calls.update, 2, 'explicit refresh remains allowed');
+  doc.hidden = false;
+  for (const fn of listeners) fn();
+  for (const fn of listeners) fn();
+  assert.equal(calls.update, 3);
+  await Promise.resolve();
+  await Promise.resolve();
+  await manager.destroyAll();
+  assert.equal(listeners.size, 0);
+  t.mock.timers.tick(10000);
+  assert.equal(calls.update, 3);
+});
 
-  try {
-    mgr.buildTogglePanel(container);
-    assert.equal(await mgr.setEnabled('satellites', true), true);
-    const controls = container
-      .querySelector('[data-layer-id="satellites"]')
-      .querySelector('.data-toggle-controls');
-    assert.equal(controls.hidden, false);
-    assert.equal(collectByClass(controls, 'data-toggle-chip').length, 1);
+async function resumeBetweenTicks(t, { failResume = false } = {}) {
+  const listeners = new Set();
+  const doc = {
+    hidden: false,
+    addEventListener: (_name, fn) => listeners.add(fn),
+    removeEventListener: (_name, fn) => listeners.delete(fn),
+  };
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: 1000 });
+  const { LayerLifecycle } = await import('./lifecycle.js');
+  const manager = new LayerLifecycle({}, { visibilityTarget: doc });
+  const { module, calls } = makeSlowLayer('resume-poll');
+  const updates = [];
+  module.update = async () => {
+    calls.update++;
+    updates.push(Date.now());
+    await Promise.resolve();
+    if (failResume && updates.length === 2) throw new Error('resume failed');
+  };
+  manager.register(module);
+  await manager.setEnabled('resume-poll', true);
+  assert.deepEqual(updates, [1000]);
+  doc.hidden = true;
+  t.mock.timers.tick(1000); // 2000: due tick skipped while hidden
+  t.mock.timers.tick(500); // 2500: return between ticks
+  doc.hidden = false;
+  for (const fn of listeners) fn();
+  assert.deepEqual(updates, [1000, 2500], 'overdue poll runs once on return');
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const managerRefreshError = manager.layers.get('resume-poll').managerRefreshError;
+  if (failResume) assert.equal(managerRefreshError, 'resume failed');
+  else assert.equal(managerRefreshError, null);
+  t.mock.timers.tick(999); // 3499: the old 3000 phase must not fire
+  assert.deepEqual(updates, [1000, 2500]);
+  t.mock.timers.tick(1); // 3500: one interval after the resume poll
+  assert.deepEqual(updates, [1000, 2500, 3500]);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.mock.timers.tick(1000);
+  assert.deepEqual(updates, [1000, 2500, 3500, 4500], 'new phase keeps one interval');
+  await Promise.resolve();
+  await Promise.resolve();
+  await manager.destroyAll();
+  assert.equal(listeners.size, 0);
+  t.mock.timers.tick(5000);
+  assert.equal(updates.length, 4);
+}
 
-    surrendered = true;
-    mgr._refreshTogglePanel();
-    assert.equal(controls.hidden, true);
-    assert.equal(collectByClass(controls, 'data-toggle-chip').length, 0,
-      'the chip is removed, not merely hidden behind a style');
-    assert.equal(collectByClass(controls, 'data-toggle-legend-item').length, 0);
+test('periodic polls realign to the deadline after a between-ticks resume', async (t) => {
+  await resumeBetweenTicks(t);
+});
 
-    surrendered = false;
-    mgr._refreshTogglePanel();
-    assert.equal(controls.hidden, false, 'the row returns when the owner releases it');
-    assert.equal(collectByClass(controls, 'data-toggle-chip').length, 1);
-  } finally {
-    await mgr.destroyAll();
-    if (originalDocument === undefined) delete globalThis.document;
-    else globalThis.document = originalDocument;
-  }
+test('periodic polls realign to the deadline after a failed resume refresh', async (t) => {
+  await resumeBetweenTicks(t, { failResume: true });
 });

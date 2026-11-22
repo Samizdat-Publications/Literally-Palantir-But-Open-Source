@@ -7,6 +7,8 @@
  * the mesh, it flattens under prefers-reduced-motion, and it stops the instant
  * anything interrupts it.
  */
+import { bindFakeCesiumCamera } from './testSupport/fakeCameraPort.mjs';
+import { bindRenderer } from './render/rendererOf.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as Cesium from 'cesium';
@@ -18,8 +20,11 @@ import {
   createRouteFlight,
   flyRoute,
   getActiveCameraMotion,
+  activeCameraMotionId,
   initCameraVerbs,
   interruptCameraMotion,
+  interruptCameraMotionIfActive,
+  moveCamera,
   prefersReducedMotion,
   routeAltitudeOffsetM,
   routeColdSeedFloorM,
@@ -96,19 +101,24 @@ function createTickableViewer({ heightM = 700 } = {}) {
       if (orientation && Number.isFinite(orientation.pitch)) camera.pitch = orientation.pitch;
     },
   };
-  const viewer = {
+  const viewer = bindFakeCesiumCamera({
     trackedEntity: undefined,
-    clock: { onTick: { addEventListener: (fn) => { listeners.push(fn); return () => {}; } } },
     scene: {
       canvas: { addEventListener() {}, removeEventListener() {} },
-      tweens: [],
       requestRender() {},
-      // A live app has a rendered surface under the route; the mesh probe reads
-      // it, so these flights start immediately rather than arming.
-      sampleHeight: () => 0,
     },
     camera,
-  };
+  }, {
+    // A live app has a rendered surface under the route; the mesh probe reads
+    // it, so these flights start immediately rather than arming.
+    query: { sampleHeightNow: () => 0 },
+    frame: {
+      on: (phase, fn) => {
+        if (phase === 'preUpdate') listeners.push(fn);
+        return () => {};
+      },
+    },
+  });
   return {
     viewer,
     setViews,
@@ -558,12 +568,17 @@ test('the rendered mesh answers when the DEM never will — once, and only once'
 test('probeMeshFloorM reports COVERAGE, not just a height', () => {
   assert.deepEqual(probeMeshFloorM(null, [{ lat: 1, lon: 1 }]),
     { heightM: Number.NaN, sampled: 0, requested: 1 }, 'no scene, no reading');
-  assert.deepEqual(probeMeshFloorM({ sampleHeight: () => 120 }, []),
+  const surface = (sampleHeightNow) => {
+    const viewer = {};
+    bindRenderer(viewer, { query: { sampleHeightNow } });
+    return viewer;
+  };
+  assert.deepEqual(probeMeshFloorM(surface(() => 120), []),
     { heightM: Number.NaN, sampled: 0, requested: 0 }, 'no cells, no reading');
   // Cells whose tiles are not streamed contribute NOTHING — silence must never
   // be mistaken for flat ground, which is why the caller gets a count.
   const partial = probeMeshFloorM(
-    { sampleHeight: (c) => (c.longitude > 0 ? 340 : undefined) },
+    surface((point) => (point.lon > 0 ? 340 : null)),
     [{ lat: 1, lon: 1 }, { lat: 1, lon: -1 }],
   );
   assert.equal(partial.heightM, 340, 'the probe takes the HIGHEST surface it saw');
@@ -999,4 +1014,121 @@ test('the 0.5 s duration floor is the one place the speed word is not the mean',
   // Anything long enough to see keeps the contract exactly.
   const normal = flightFrom(TWO_TURN_ROUTE);
   assert.ok(Math.abs((normal.totalM / normal.durationS) - CRUISE_M_S.normal) < 1e-9);
+});
+
+test('a flight can be stopped by its owner, and only while it is still theirs', () => {
+  // CLEAR in the Directions row must stop the flight IT started. By then the
+  // camera may belong to someone else — the user grabbed it, voice flew
+  // somewhere, a tracked aircraft took over — and stopping that would be a
+  // feature reaching across the app to cancel a stranger's motion.
+  const viewer = createTickableViewer();
+  initCameraVerbs(viewer.viewer, () => null);
+  const path = TWO_TURN_ROUTE.map(([lon, lat]) => ({ lon, lat, height: 0 }));
+
+  assert.equal(activeCameraMotionId(), 0, 'an idle camera has no motion id');
+  const first = flyRoute([{ type: 'route', label: 'mine', path }]);
+  assert.equal(first.ok, true);
+  assert.ok(first.motionId > 0, 'a started flight reports its id');
+  assert.equal(activeCameraMotionId(), first.motionId);
+  assert.equal(getActiveCameraMotion().motionId, first.motionId);
+
+  // Someone else replaces it. The first owner's cancel must now be inert.
+  const second = flyRoute([{ type: 'route', label: 'theirs', path }]);
+  assert.ok(second.motionId > first.motionId, 'ids are monotonic');
+  assert.equal(
+    interruptCameraMotionIfActive(first.motionId, 'stale-owner').wasActive,
+    false,
+  );
+  assert.equal(
+    activeCameraMotionId(),
+    second.motionId,
+    'the newer flight is still running',
+  );
+
+  // The current owner stops its own flight.
+  assert.equal(
+    interruptCameraMotionIfActive(second.motionId, 'owner-cancel').wasActive,
+    true,
+  );
+  assert.equal(activeCameraMotionId(), 0);
+  assert.equal(getActiveCameraMotion(), null);
+
+  // A second cancel, and a cancel with no id at all, stop nothing.
+  assert.equal(interruptCameraMotionIfActive(second.motionId).wasActive, false);
+  assert.equal(interruptCameraMotionIfActive(0).wasActive, false);
+  viewer.restore();
+});
+
+test('a new viewer lifetime drops the previous view-target getter', () => {
+  // The getter closes over the viewer it was built for. Re-initialising for a
+  // new viewer without one must not leave the old callback answering.
+  const first = createTickableViewer();
+  const target = Cesium.Cartesian3.fromDegrees(-97.76, 30.26, 0);
+  let asked = 0;
+  initCameraVerbs(first.viewer, () => { asked += 1; return target; });
+  const orbit = moveCamera({ motion: 'orbit', mode: 'continuous' });
+  assert.equal(orbit.ok, true);
+  assert.equal(orbit.armed, undefined, 'the installed getter supplied a target');
+  assert.ok(asked > 0);
+  interruptCameraMotion('test-cleanup');
+
+  // Same viewer, no getter: the installed one stays.
+  initCameraVerbs(first.viewer);
+  const again = moveCamera({ motion: 'orbit', mode: 'continuous' });
+  assert.equal(again.armed, undefined, 'the getter survives a call without one');
+  interruptCameraMotion('test-cleanup');
+  first.restore();
+
+  // New viewer, no getter: the old one is gone, so the orbit arms instead of
+  // capturing a target from a viewer that no longer exists.
+  const second = createTickableViewer();
+  initCameraVerbs(second.viewer);
+  const askedBefore = asked;
+  const armed = moveCamera({ motion: 'orbit', mode: 'continuous' });
+  assert.equal(armed.armed, 'waiting-for-arrival');
+  assert.equal(asked, askedBefore, 'the old getter was never called again');
+  interruptCameraMotion('test-cleanup');
+  second.restore();
+});
+
+test('a route hidden from Draw is not flown; the newest visible one is', () => {
+  const viewer = createTickableViewer();
+  initCameraVerbs(viewer.viewer, () => null);
+  const route = (label, hidden) => ({
+    type: 'route',
+    label,
+    hidden,
+    path: TWO_TURN_ROUTE.map(([lon, lat]) => ({ lon, lat, height: 0 })),
+  });
+  const onlyHidden = flyRoute([route('hidden walk', true)]);
+  assert.equal(onlyHidden.ok, false, 'a board of hidden routes has none to fly');
+  const started = flyRoute([route('shown walk', false), route('hidden walk', true)]);
+  assert.equal(started.ok, true);
+  assert.match(JSON.stringify(started), /shown walk/, 'the visible route is flown');
+  interruptCameraMotion?.('test');
+});
+
+test('a frame port bound after the verbs started runs the next motion', () => {
+  // A viewer with no renderer yet, so no frame port to listen to.
+  const viewer = {
+    canvas: { addEventListener() {}, removeEventListener() {} },
+    scene: { canvas: { addEventListener() {}, removeEventListener() {} } },
+  };
+  try {
+    initCameraVerbs(viewer);
+    const listeners = [];
+    bindRenderer(viewer, {
+      frame: {
+        on: (phase, fn) => {
+          if (phase === 'preUpdate') listeners.push(fn);
+          return () => listeners.splice(listeners.indexOf(fn), 1);
+        },
+      },
+    });
+    assert.equal(listeners.length, 0, 'nothing listens before a motion');
+    assert.equal(moveCamera({ motion: 'rotate', direction: 'left' }).ok, true);
+    assert.equal(listeners.length, 1, 'the motion runs on the bound port');
+  } finally {
+    interruptCameraMotion('test-cleanup');
+  }
 });

@@ -2,7 +2,8 @@
 /**
  * Deterministic browser proof for the Radio companion layer.
  *
- * Intercepts only `/api/radio/*` with a 750-station fixture and stubs the
+ * Intercepts Radio endpoints with a 750-station fixture, supplies fixed
+ * satellite/context support responses, and stubs the
  * browser media `play()` primitive. It proves marker scale/culling, dynamic
  * station-tag filtering, first-click selection, direct-action-only playback, panel/Context
  * independence, restoration without autoplay, responsive UI, and a clean
@@ -25,11 +26,15 @@ const option = (name, fallback) => {
 };
 const APP_URL = option('--url', process.env.QA_BASE_URL || 'http://localhost:4173');
 const APP_ORIGIN = new URL(APP_URL).origin;
+// Radio owns this harness's keyboard and pointer actions; the welcome dialog
+// has its own acceptance harness and must not intercept those gestures.
+const RADIO_URL = new URL(APP_URL);
+RADIO_URL.searchParams.set('welcome', '0');
 const HEADFUL = args.includes('--headful');
 
 const chromeCandidates = [
   process.env.PUPPETEER_EXECUTABLE_PATH,
-  (() => { try { return puppeteer.executablePath(); } catch { return null; } })(),
+  await puppeteer.executablePath().catch(() => null),
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
 ].filter(Boolean);
@@ -76,6 +81,48 @@ function check(name, ok, detail = '') {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Radio lives only inside Context; a user reaches its controls by expanding
+// Context and then Radio. Returns the prior collapse state so a step can put
+// the panels back for the scenarios that follow.
+async function revealRadioControls(page, targetId) {
+  const prior = await page.evaluate(async (id) => {
+    const manager = window.__godsEyeView.styleManager;
+    const collapsed = (panelId) => document.getElementById(panelId).classList.contains('collapsed');
+    const state = { context: collapsed('global-context-panel'), radio: collapsed('radio-panel') };
+    manager.setPanelCollapsed('global-context-panel', false, { explicit: true });
+    manager.setPanelCollapsed('radio-panel', false, { explicit: true });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    document.getElementById(id).scrollIntoView({ block: 'nearest' });
+    return state;
+  }, targetId);
+  await page.waitForSelector(`#${targetId}`, { visible: true });
+  return prior;
+}
+
+async function restoreRadioPanels(page, prior) {
+  await page.evaluate(({ context, radio }) => {
+    const manager = window.__godsEyeView.styleManager;
+    manager.setPanelCollapsed('radio-panel', radio);
+    manager.setPanelCollapsed('global-context-panel', context);
+  }, prior);
+}
+
+// Native pick buffers and clustered overlay entries settle on rendered frames,
+// not on wall-clock sleeps, particularly with software rendering.
+async function settleRadioFrames(page) {
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    const scene = window.__godsEyeView.viewer.scene;
+    let remaining = 4;
+    const timeout = setTimeout(() => { remove(); reject(new Error('Radio rendered-frame deadline exceeded')); }, 10_000);
+    const remove = scene.postRender.addEventListener(() => {
+      if (--remaining === 0) { remove(); clearTimeout(timeout); resolve(); }
+      else requestAnimationFrame(() => scene.requestRender());
+    });
+    scene.requestRender();
+  }));
+}
+
+
 async function main() {
   const response = await fetch(APP_URL).catch(() => null);
   if (!response?.ok) {
@@ -87,7 +134,10 @@ async function main() {
     headless: HEADFUL ? false : 'new',
     ...(chrome ? { executablePath: chrome } : {}),
     args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--use-gl=angle',
+      '--no-sandbox', '--disable-setuid-sandbox',
+      ...(process.platform === 'darwin'
+        ? ['--use-angle=metal', '--enable-gpu']
+        : ['--use-gl=angle', '--use-angle=swiftshader']),
       '--disable-dev-shm-usage', '--disable-background-timer-throttling',
       '--disable-renderer-backgrounding', '--window-size=1440,900',
     ],
@@ -134,6 +184,50 @@ async function main() {
         queueMicrotask(() => this.dispatchEvent(new Event('playing')));
         return Promise.resolve();
       };
+      // What Radio draws, read from the renderer's draw-port sets: the
+      // station dots (`stations`), cluster dots (`clusters`), and the
+      // selected station's dot (`selected`) and bracket
+      // (`selected-bracket`). Each row is a drawn point or billboard whose
+      // pick id is the draw port's `{set, id, meta}`; `show` is whether it
+      // draws, its set's host included.
+      window.__qaRadioRows = (kind) => {
+        const pattern = new RegExp(`^radio:\\d+:${kind}$`);
+        const out = [];
+        const visit = (node, shown) => {
+          if (!node || typeof node.get !== 'function' || typeof node.length !== 'number') return;
+          const here = shown && node.show !== false;
+          for (let index = 0; index < node.length; index += 1) {
+            const child = node.get(index);
+            const id = child?.id;
+            if (id && typeof id === 'object' && !Array.isArray(id) && typeof id.set === 'string') {
+              if (pattern.test(id.set)) {
+                out.push({
+                  primitive: child,
+                  id: id.id,
+                  meta: id.meta,
+                  show: here && child.show !== false,
+                  setShown: here,
+                });
+              }
+            } else visit(child, here);
+          }
+        };
+        visit(window.__godsEyeView.viewer.scene.primitives, true);
+        return out;
+      };
+      // The selected station's drawn dot and bracket, with its pick id.
+      window.__qaRadioSelected = () => {
+        const dot = window.__qaRadioRows('selected')[0] || null;
+        if (!dot) return null;
+        const bracket = window.__qaRadioRows('selected-bracket')[0] || null;
+        return {
+          id: dot.id,
+          show: dot.show,
+          position: dot.primitive.position,
+          dot,
+          bracket,
+        };
+      };
     });
     await page.setRequestInterception(true);
     let catalogDegraded = false;
@@ -142,6 +236,35 @@ async function main() {
     let catalogResponseDelayMs = 0;
     page.on('request', (request) => {
       const url = new URL(request.url());
+
+      // Radio QA uses keyless maps; an optional Google token is not offered.
+      if (request.method() === 'GET' && url.origin === APP_ORIGIN
+        && url.pathname === '/api/google/tiles-token') {
+        request.respond({ status: 200, contentType: 'application/json', body: '{}' });
+        return;
+      }
+
+    // These scenarios exercise Context lifecycle and keyboard ownership, not
+    // live orbit accuracy. Reuse the tracking suite's fixed element sets so
+    // CelesTrak outages cannot invalidate an otherwise clean UI run.
+    if (url.origin === APP_ORIGIN
+      && ['/api/celestrak/active', '/api/celestrak/starlink'].includes(url.pathname)) {
+      const dense = url.pathname.endsWith('/starlink');
+      request.respond({
+        status: 200,
+        contentType: 'text/plain',
+        body: (dense ? [
+          'STARLINK-1007',
+          '1 44713U 19074A   24001.50000000  .00016717  00000-0  10270-3 0  9004',
+          '2 44713  53.0000 247.4627 0006703 130.5360 325.0288 15.06000000 12345',
+        ] : [
+          'ISS (ZARYA)',
+          '1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9004',
+          '2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.49814310 12345',
+        ]).join('\n') + '\n',
+      });
+      return;
+    }
       if (url.origin === APP_ORIGIN && url.pathname === '/api/radio/stations') {
         const response = {
           status: 200,
@@ -173,7 +296,7 @@ async function main() {
         });
         return;
       }
-      if (url.origin === APP_ORIGIN && url.pathname === '/api/ais-live') {
+      if (url.origin === APP_ORIGIN && url.pathname === '/api/vessels') {
         request.respond({
           status: 200,
           contentType: 'application/json',
@@ -213,7 +336,7 @@ async function main() {
       }
     });
 
-    await page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await page.goto(RADIO_URL.href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await page.waitForFunction(() => window.__godsEyeView?.dataManager, { timeout: 60_000 });
     await page.waitForFunction(() => window.__godsEyeView?.styleManager?._dataManager?.layers?.has('radio'), { timeout: 60_000 });
     await page.waitForFunction(
@@ -232,31 +355,16 @@ async function main() {
       window.__godsEyeView.styleManager.setPanelCollapsed('global-context-panel', true);
     });
 
+    const enablePanels = await revealRadioControls(page, 'radio-enable-btn');
     const enableStartedAt = Date.now();
-    const initialDisclosure = await page.evaluate(() => {
-      const button = document.getElementById('context-radio-toggle-btn');
-      const mini = document.getElementById('context-radio-mini');
-      const enabledBefore = window.__godsEyeView.dataManager.isEnabled('radio');
-      button.click();
-      return {
-        enabledBefore,
-        enabledAfterDisclosure: window.__godsEyeView.dataManager.isEnabled('radio'),
-        expanded: button.getAttribute('aria-expanded'),
-        miniHidden: mini.hidden,
-      };
-    });
-    check(
-      'Radio launcher discloses compact controls without changing power',
-      !initialDisclosure.enabledBefore && !initialDisclosure.enabledAfterDisclosure
-        && initialDisclosure.expanded === 'true' && !initialDisclosure.miniHidden,
-      JSON.stringify(initialDisclosure),
-    );
-    await page.$eval('#context-radio-mini-enable-btn', (button) => button.click());
+    await page.click('#radio-enable-btn');
     await page.waitForFunction(() => {
       const state = window.__godsEyeView.dataManager.layers.get('radio').module.getUIState();
       return state.enabled && !state.loading && state.stationCount === 750;
     });
     const enableElapsedMs = Date.now() - enableStartedAt;
+    // Later scenarios start from the collapsed rail this step began with.
+    await restoreRadioPanels(page, enablePanels);
     const initial = await page.evaluate(() => {
       const module = window.__godsEyeView.dataManager.layers.get('radio').module;
       const state = module.getUIState();
@@ -275,22 +383,18 @@ async function main() {
           color: entry.dataset.radioColor,
         })),
         enablePressed: document.getElementById('radio-enable-btn').getAttribute('aria-pressed'),
-        launcherExpanded: document.getElementById('context-radio-toggle-btn').getAttribute('aria-expanded'),
-        launcherActive: document.getElementById('context-radio-toggle-btn').classList.contains('active'),
-        compactEnablePressed: document.getElementById('context-radio-mini-enable-btn').getAttribute('aria-pressed'),
         fullPlayEnabled: !document.getElementById('radio-play-btn').disabled,
         fullPlayLabel: document.getElementById('radio-play-btn').getAttribute('aria-label'),
         tunerVisible: !document.getElementById('radio-tuner').hidden,
-        tunerCount: window.__godsEyeView.styleManager._radioTunerStations.length,
+        tunerCount: window.__godsEyeView.styleManager._radioControls._radioTunerStations.length,
         tunerLabel: document.getElementById('radio-tuner-band-label').textContent,
       };
     });
     check('750-station catalog renders within the browser budget', initial.state.stationCount === 750 && enableElapsedMs < 5000, `${enableElapsedMs}ms`);
     check('enable does not autoplay', initial.plays === 0 && initial.state.audioState === 'stopped');
     check(
-      'compact and detailed Radio power controls reflect the layer manager independently of disclosure',
-      initial.enablePressed === 'true' && initial.compactEnablePressed === 'true'
-        && initial.launcherExpanded === 'true' && initial.launcherActive,
+      'Radio power control reflects the layer manager after the panels collapse again',
+      initial.enablePressed === 'true',
     );
     check('dynamic canonical and genre categories reach the UI', initial.filterOptions >= 10, `${initial.filterOptions} options`);
     const musicOption = initial.filterPalette.find((entry) => entry.id === 'music');
@@ -328,23 +432,23 @@ async function main() {
         enabled: true,
         uncertain: true,
       });
-      gev.dataManager._refreshTogglePanel();
+      gev.dataManager.refreshLayerStats();
       const staticResult = module.setTuningStatic(true);
       const filterBefore = module.getUIState().filter;
       const filterControl = document.getElementById('radio-filter');
-      const originalPinned = style._radioTunerBandPinnedForNavigation;
-      const originalPool = style._radioTunerPool;
-      style._radioTunerBandPinnedForNavigation = true;
+      const originalPinned = style._radioControls._radioTunerBandPinnedForNavigation;
+      const originalPool = style._radioControls._radioTunerPool;
+      style._radioControls._radioTunerBandPinnedForNavigation = true;
       filterControl.value = filterBefore === 'news' ? 'all' : 'news';
       filterControl.dispatchEvent(new Event('change', { bubbles: true }));
       const rejectedUIFilter = {
         moduleFilter: module.getUIState().filter,
         controlFilter: filterControl.value,
-        pinned: style._radioTunerBandPinnedForNavigation,
-        poolIdentityPreserved: style._radioTunerPool === originalPool,
+        pinned: style._radioControls._radioTunerBandPinnedForNavigation,
+        poolIdentityPreserved: style._radioControls._radioTunerPool === originalPool,
       };
-      style._radioTunerBandPinnedForNavigation = originalPinned;
-      style._radioTunerPool = originalPool;
+      style._radioControls._radioTunerBandPinnedForNavigation = originalPinned;
+      style._radioControls._radioTunerPool = originalPool;
       const filterResult = module.setFilter('news');
       const toggleResult = await module.togglePlayback({ origin: 'user' });
       const directSelect = module.selectStation(stationId, {
@@ -360,20 +464,16 @@ async function main() {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const result = {
         presentationActive: module.getUIState().presentationActive,
-        markerSourceVisible: gev.viewer.dataSources.getByName('Radio stations')[0]?.show,
+        markerSourceVisible: (window.__qaRadioRows('stations')[0]?.setShown ?? false),
         tunerHidden: document.getElementById('radio-tuner').hidden,
         filterDisabled: document.getElementById('radio-filter').disabled,
         prevDisabled: document.getElementById('radio-prev-btn').disabled,
         playDisabled: document.getElementById('radio-play-btn').disabled,
         volumeDisabled: document.getElementById('radio-volume').disabled,
-        disclosureLabel: document.getElementById('context-radio-toggle-btn').getAttribute('aria-label'),
-        compactPowerLabel: document.getElementById('context-radio-mini-enable-btn').getAttribute('aria-label'),
-        compactPowerText: document.getElementById('context-radio-mini-enable-btn').textContent,
         fullLabel: document.getElementById('radio-enable-btn').getAttribute('aria-label'),
         fullText: document.getElementById('radio-enable-btn').textContent,
         layerState: document.getElementById('radio-layer-state').textContent,
         playbackMessage: document.getElementById('radio-playback-state').textContent,
-        miniStation: document.getElementById('context-radio-mini-station').textContent,
         dataRailText: document.querySelector('[data-layer-id="radio"] .data-toggle-btn')?.textContent,
         dataRailState: document.querySelector('[data-layer-id="radio"] .data-toggle-btn')?.dataset.feedState,
         dataRailLabel: document.querySelector('[data-layer-id="radio"] .data-toggle-btn')?.getAttribute('aria-label'),
@@ -401,7 +501,7 @@ async function main() {
         enabled: true,
         uncertain: false,
       });
-      gev.dataManager._refreshTogglePanel();
+      gev.dataManager.refreshLayerStats();
       module.cancelTuning();
       camera.flyTo = originalFlyTo;
       return result;
@@ -415,14 +515,10 @@ async function main() {
         && uncertainPresentation.prevDisabled
         && uncertainPresentation.playDisabled
         && uncertainPresentation.volumeDisabled
-        && /compact Radio controls/i.test(uncertainPresentation.disclosureLabel)
-        && /uncertain/i.test(uncertainPresentation.compactPowerLabel)
-        && uncertainPresentation.compactPowerText === 'RECONCILE'
         && /uncertain/i.test(uncertainPresentation.fullLabel)
         && uncertainPresentation.fullText === 'RECONCILE'
         && uncertainPresentation.layerState === 'UNCERTAIN'
         && /uncertain/i.test(uncertainPresentation.playbackMessage)
-        && uncertainPresentation.miniStation === 'RADIO STATE UNCERTAIN'
         && uncertainPresentation.dataRailText === 'UNCERTAIN'
         && uncertainPresentation.dataRailState === 'uncertain'
         && /uncertain/i.test(uncertainPresentation.dataRailLabel)
@@ -462,12 +558,8 @@ async function main() {
     const disablingPresentation = await page.evaluate(() => ({
       manager: window.__godsEyeView.dataManager.getLayerLifecycleState('radio'),
       presentationActive: window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().presentationActive,
-      markerSourceVisible: window.__godsEyeView.viewer.dataSources.getByName('Radio stations')[0]?.show,
+      markerSourceVisible: (window.__qaRadioRows('stations')[0]?.setShown ?? false),
       full: document.getElementById('radio-enable-btn').textContent,
-      disclosure: document.getElementById('context-radio-toggle-btn').getAttribute('aria-label'),
-      disclosureControls: document.getElementById('context-radio-toggle-btn').getAttribute('aria-controls'),
-      disclosureExpanded: document.getElementById('context-radio-toggle-btn').getAttribute('aria-expanded'),
-      compactPower: document.getElementById('context-radio-mini-enable-btn').textContent,
       layerState: document.getElementById('radio-layer-state').textContent,
       message: document.getElementById('radio-playback-state').textContent,
       stopDisabled: document.getElementById('radio-stop-btn').disabled,
@@ -481,8 +573,6 @@ async function main() {
         && disablingPresentation.presentationActive === false
         && disablingPresentation.markerSourceVisible === false
         && disablingPresentation.full === 'DISABLING'
-        && /compact Radio controls/i.test(disablingPresentation.disclosure)
-        && disablingPresentation.compactPower === 'DISABLING'
         && disablingPresentation.layerState === 'DISABLING'
         && /disabling/i.test(disablingPresentation.message)
         && disablingPresentation.stopDisabled
@@ -537,12 +627,8 @@ async function main() {
     const enablingPresentation = await page.evaluate(() => ({
       manager: window.__godsEyeView.dataManager.getLayerLifecycleState('radio'),
       presentationActive: window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().presentationActive,
-      markerSourceVisible: window.__godsEyeView.viewer.dataSources.getByName('Radio stations')[0]?.show,
+      markerSourceVisible: (window.__qaRadioRows('stations')[0]?.setShown ?? false),
       full: document.getElementById('radio-enable-btn').textContent,
-      disclosure: document.getElementById('context-radio-toggle-btn').getAttribute('aria-label'),
-      disclosureControls: document.getElementById('context-radio-toggle-btn').getAttribute('aria-controls'),
-      disclosureExpanded: document.getElementById('context-radio-toggle-btn').getAttribute('aria-expanded'),
-      compactPower: document.getElementById('context-radio-mini-enable-btn').textContent,
       layerState: document.getElementById('radio-layer-state').textContent,
       message: document.getElementById('radio-playback-state').textContent,
       tunerHidden: document.getElementById('radio-tuner').hidden,
@@ -557,10 +643,6 @@ async function main() {
         && enablingPresentation.presentationActive === false
         && enablingPresentation.markerSourceVisible === false
         && enablingPresentation.full === 'ENABLING'
-        && enablingPresentation.disclosure === 'Go to expanded Radio section'
-        && enablingPresentation.disclosureControls === 'radio-panel'
-        && enablingPresentation.disclosureExpanded === 'true'
-        && enablingPresentation.compactPower === 'ENABLING'
         && enablingPresentation.layerState === 'ENABLING'
         && /enabling/i.test(enablingPresentation.message)
         && enablingPresentation.tunerHidden
@@ -571,7 +653,14 @@ async function main() {
     await page.evaluate(() => window.__qaReleaseRadioEnable?.());
     await page.waitForFunction(() => window.__godsEyeView.dataManager.isEnabled('radio'));
     await page.evaluate(() => window.__qaRestoreRadioEnable?.());
-    await sleep(650);
+    await page.waitForFunction(() => {
+      const scroller = document.querySelector('#global-context-panel .global-context-panel-inner');
+      const viewport = scroller.getBoundingClientRect();
+      const directory = document.querySelector('#radio-panel .radio-directory-row').getBoundingClientRect();
+      const play = document.getElementById('radio-play-btn').getBoundingClientRect();
+      return directory.top >= viewport.top && directory.bottom <= viewport.bottom
+        && play.top >= viewport.top && play.bottom <= viewport.bottom;
+    }, { timeout: 10_000 });
     const explicitRevealAfter = await page.evaluate(() => {
       const gev = window.__godsEyeView;
       const scroller = document.querySelector('#global-context-panel .global-context-panel-inner');
@@ -638,11 +727,10 @@ async function main() {
           viewer.scene.requestRender();
         }, { lon: spec.lon, height: view.height });
         await sleep(700);
+        await settleRadioFrames(page);
         const sample = await page.evaluate(async () => {
           const viewer = window.__godsEyeView.viewer;
           const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
-          const dataSource = Array.from({ length: viewer.dataSources.length }, (_, index) => viewer.dataSources.get(index))
-            .find((item) => item.name === 'Radio stations');
           const { getOverlayPaintRect, getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
           const { radioStationIdFromPick } = await import('/src/data/radio.js');
           return new Promise((resolve) => {
@@ -664,7 +752,9 @@ async function main() {
                 host: getWorldOverlayDiagnostics(),
                 paintedSingletonIds,
                 pickableSingletonIds,
-                nativeLabelCount: dataSource.entities.values.filter((entity) => Boolean(entity.label)).length,
+                // The station dots are a draw-port point set, which draws no
+                // labels of its own; a label primitive would be a row here.
+                nativeLabelCount: window.__qaRadioRows('stations').filter((row) => row.primitive.text !== undefined).length,
               });
             };
             const timeout = setTimeout(finish, 500);
@@ -729,10 +819,10 @@ async function main() {
       const originalRestoreEnabledLayerIds = dataManager.restoreEnabledLayerIds;
       const originalIsEnabled = dataManager.isEnabled;
       const originalIsEffectivelyEnabled = dataManager.isEffectivelyEnabled;
-      const originalClear = styleManager._clearLayersOutsideContextMode;
-      const originalCapture = styleManager._captureContextSessionSnapshot;
-      const originalContextMode = styleManager._contextMode;
-      const originalSnapshot = styleManager._contextSessionSnapshot;
+      const originalClear = styleManager._contextControls._clearLayersOutsideContextMode;
+      const originalCapture = styleManager._contextControls._captureContextSessionSnapshot;
+      const originalContextMode = styleManager._contextControls._contextMode;
+      const originalSnapshot = styleManager._contextControls._contextSessionSnapshot;
       const originalShowToast = styleManager._showToast;
       const installations = dataManager.layers.get('military-installations')?.module;
       const originalSearchNearby = installations?.searchNearby;
@@ -743,19 +833,19 @@ async function main() {
         const semanticFalseMessage = document.getElementById('toast').textContent;
 
         const enabled = new Set();
-        styleManager._captureContextSessionSnapshot = () => {};
+        styleManager._contextControls._captureContextSessionSnapshot = () => {};
         const runContextFailure = async (mode, phase, outcome) => {
           enabled.clear();
           enabled.add('local-datacenters');
-          styleManager._contextMode = null;
-          styleManager._contextSessionSnapshot = {
+          styleManager._contextControls._contextMode = null;
+          styleManager._contextControls._contextSessionSnapshot = {
             enabledLayerIds: new Set(enabled),
             userAdded: new Set(),
             userRemoved: new Set(),
             params: {},
           };
           let failureUsed = false;
-          const entryLayerId = mode === 'flights' ? 'military-awareness' : 'rocket-launches';
+          const entryLayerId = 'military-awareness';
           dataManager.setEnabled = async (layerId, shouldEnable) => {
             const failsIsolation = phase === 'isolation' && layerId === 'local-datacenters' && !shouldEnable;
             const failsActivation = phase === 'activation' && layerId === entryLayerId && shouldEnable;
@@ -768,7 +858,7 @@ async function main() {
             return true;
           };
           const result = await styleManager._runUserFacingContextAction(
-            () => styleManager._selectContextMode(mode),
+            () => styleManager._contextControls._selectContextMode(mode),
             `${mode} QA transition failed`,
           );
           await new Promise((resolve) => setTimeout(resolve, 0));
@@ -777,12 +867,11 @@ async function main() {
             phase,
             outcome,
             result,
-            visibleMode: styleManager._contextMode,
-            snapshotCleared: styleManager._contextSessionSnapshot === null,
+            visibleMode: styleManager._contextControls._contextMode,
+            snapshotCleared: styleManager._contextControls._contextSessionSnapshot === null,
             priorLayerRestored: enabled.has('local-datacenters'),
             entryEnabled: enabled.has(entryLayerId),
             flightsButtonDisabled: document.getElementById('global-context-flights-btn').disabled,
-            missionsButtonDisabled: document.getElementById('global-context-missions-btn').disabled,
             message: document.getElementById('toast').textContent,
           };
         };
@@ -803,7 +892,7 @@ async function main() {
           }
         };
         const contextFailures = [];
-        for (const mode of ['flights', 'space-missions']) {
+        for (const mode of ['flights']) {
           for (const phase of ['isolation', 'activation']) {
             for (const outcome of ['false', 'reject']) {
               contextFailures.push(await runContextFailure(mode, phase, outcome));
@@ -812,12 +901,12 @@ async function main() {
         }
 
         const directEntryFailures = [];
-        for (const layerId of ['military-awareness', 'rocket-launches']) {
+        for (const layerId of ['military-awareness']) {
           for (const outcome of ['false', 'reject']) {
             enabled.clear();
             enabled.add('local-datacenters');
-            styleManager._contextMode = null;
-            styleManager._contextSessionSnapshot = {
+            styleManager._contextControls._contextMode = null;
+            styleManager._contextControls._contextSessionSnapshot = {
               enabledLayerIds: new Set(enabled),
               userAdded: new Set(),
               userRemoved: new Set(),
@@ -832,7 +921,7 @@ async function main() {
             dataManager.setEnabled = async (candidateId, shouldEnable, options = {}) => {
               if (!failureUsed && candidateId === 'local-datacenters' && !shouldEnable) {
                 failureUsed = true;
-                styleManager._handleContextLayerChange({
+                styleManager._contextControls._handleContextLayerChange({
                   type: 'visibility-failed',
                   layerId: candidateId,
                   enabled: shouldEnable,
@@ -851,7 +940,7 @@ async function main() {
               enabled: true,
               origin: 'user',
             });
-            styleManager._handleContextLayerChange({
+            styleManager._contextControls._handleContextLayerChange({
               type: 'visibility-blocked',
               layerId,
               enabled: true,
@@ -871,20 +960,20 @@ async function main() {
               reason,
               retryReason,
               toastMessages,
-              mode: styleManager._contextMode,
-              snapshotCleared: styleManager._contextSessionSnapshot === null,
+              mode: styleManager._contextControls._contextMode,
+              snapshotCleared: styleManager._contextControls._contextSessionSnapshot === null,
               priorLayerRestored,
-              modeChanging: styleManager._contextModeChanging,
+              modeChanging: styleManager._contextControls._contextModeChanging,
             });
           }
         }
         styleManager._showToast = originalShowToast;
 
         const directActivationFailures = [];
-        for (const layerId of ['military-awareness', 'rocket-launches']) {
+        for (const layerId of ['military-awareness']) {
           enabled.clear();
-          styleManager._contextMode = null;
-          styleManager._contextSessionSnapshot = {
+          styleManager._contextControls._contextMode = null;
+          styleManager._contextControls._contextSessionSnapshot = {
             enabledLayerIds: new Set(['local-datacenters']),
             userAdded: new Set(),
             userRemoved: new Set(),
@@ -894,7 +983,7 @@ async function main() {
             shouldEnable ? enabled.add(candidateId) : enabled.delete(candidateId);
             return true;
           };
-          styleManager._handleContextLayerChange({
+          styleManager._contextControls._handleContextLayerChange({
             type: 'visibility-failed',
             layerId,
             enabled: true,
@@ -903,18 +992,18 @@ async function main() {
           await new Promise((resolve) => setTimeout(resolve, 50));
           directActivationFailures.push({
             layerId,
-            mode: styleManager._contextMode,
-            snapshotCleared: styleManager._contextSessionSnapshot === null,
+            mode: styleManager._contextControls._contextMode,
+            snapshotCleared: styleManager._contextControls._contextSessionSnapshot === null,
             priorLayerRestored: enabled.has('local-datacenters'),
             failedLayerDisabled: !enabled.has(layerId),
           });
         }
 
         const directActivationRollbackFailures = [];
-        for (const layerId of ['military-awareness', 'rocket-launches']) {
+        for (const layerId of ['military-awareness']) {
           enabled.clear();
-          styleManager._contextMode = null;
-          styleManager._contextSessionSnapshot = {
+          styleManager._contextControls._contextMode = null;
+          styleManager._contextControls._contextSessionSnapshot = {
             enabledLayerIds: new Set(['local-datacenters']),
             userAdded: new Set(),
             userRemoved: new Set(),
@@ -931,7 +1020,7 @@ async function main() {
             shouldEnable ? enabled.add(candidateId) : enabled.delete(candidateId);
             return true;
           };
-          styleManager._handleContextLayerChange({
+          styleManager._contextControls._handleContextLayerChange({
             type: 'visibility-failed',
             layerId,
             enabled: true,
@@ -942,7 +1031,7 @@ async function main() {
           directActivationRollbackFailures.push({
             layerId,
             toastMessages,
-            retryRetained: styleManager._contextSessionSnapshot?.enabledLayerIds?.has('local-datacenters') === true,
+            retryRetained: styleManager._contextControls._contextSessionSnapshot?.enabledLayerIds?.has('local-datacenters') === true,
           });
         }
 
@@ -972,8 +1061,8 @@ async function main() {
           window.__gevQaRegisterLayer(dataManager, qaLayer);
           try {
             const enabledBeforeExit = dataManager.getEnabledLayerIds();
-            styleManager._contextMode = 'flights';
-            styleManager._contextSessionSnapshot = {
+            styleManager._contextControls._contextMode = 'flights';
+            styleManager._contextControls._contextSessionSnapshot = {
               enabledLayerIds: new Set([...enabledBeforeExit, layerId]),
               userAdded: new Set(),
               userRemoved: new Set(),
@@ -985,13 +1074,13 @@ async function main() {
             };
             const unhandledBefore = unhandled.length;
             const result = await styleManager._runUserFacingContextAction(
-              (notificationToken) => styleManager._deactivateContextForLayerChange({ notificationToken }),
+              (notificationToken) => styleManager._contextControls._deactivateContextForLayerChange({ notificationToken }),
               `QA Context exit ${outcome} surfaced once`,
             );
-            const retainedForRetry = styleManager._contextSessionSnapshot?.enabledLayerIds?.has(layerId) === true;
+            const retainedForRetry = styleManager._contextControls._contextSessionSnapshot?.enabledLayerIds?.has(layerId) === true;
             enableOutcome = 'success';
             const retryResult = await styleManager._runUserFacingContextAction(
-              (notificationToken) => styleManager._deactivateContextForLayerChange({ notificationToken }),
+              (notificationToken) => styleManager._contextControls._deactivateContextForLayerChange({ notificationToken }),
               `QA Context exit ${outcome} retry failed`,
             );
             contextExitFailures.push({
@@ -1001,9 +1090,9 @@ async function main() {
               toastMessages,
               unhandledDelta: unhandled.length - unhandledBefore,
               retainedForRetry,
-              mode: styleManager._contextMode,
-              modeChanging: styleManager._contextModeChanging,
-              snapshotClearedAfterRetry: styleManager._contextSessionSnapshot === null,
+              mode: styleManager._contextControls._contextMode,
+              modeChanging: styleManager._contextControls._contextModeChanging,
+              snapshotClearedAfterRetry: styleManager._contextControls._contextSessionSnapshot === null,
               enabledAfterRetry: dataManager.isEnabled(layerId),
               toastRole: document.getElementById('toast').getAttribute('role'),
               toastLive: document.getElementById('toast').getAttribute('aria-live'),
@@ -1054,7 +1143,7 @@ async function main() {
         document.getElementById('installations-search-btn').click();
         await new Promise((resolve) => setTimeout(resolve, 50));
         const installationFalseMessage = document.getElementById('toast').textContent;
-        const installationFalseReleased = !document.getElementById('installations-search-btn').disabled;
+        const installationFalseReleased = document.getElementById('installations-search-btn').getAttribute('aria-busy') === 'false';
 
         dataManager.setEnabled = async (layerId, shouldEnable) => {
           if (layerId === 'military-installations' && shouldEnable) {
@@ -1065,7 +1154,7 @@ async function main() {
         document.getElementById('installations-search-btn').click();
         await new Promise((resolve) => setTimeout(resolve, 50));
         const installationEnableRejectionMessage = document.getElementById('toast').textContent;
-        const installationEnableRejectionReleased = !document.getElementById('installations-search-btn').disabled;
+        const installationEnableRejectionReleased = document.getElementById('installations-search-btn').getAttribute('aria-busy') === 'false';
 
         dataManager.setEnabled = async (layerId, shouldEnable) => {
           if (layerId === 'military-installations' && shouldEnable) enabled.add(layerId);
@@ -1077,13 +1166,13 @@ async function main() {
         document.getElementById('installations-search-btn').click();
         await new Promise((resolve) => setTimeout(resolve, 50));
         const installationRejectionMessage = document.getElementById('toast').textContent;
-        const installationRejectionReleased = !document.getElementById('installations-search-btn').disabled;
+        const installationRejectionReleased = document.getElementById('installations-search-btn').getAttribute('aria-busy') === 'false';
 
         if (installations) installations.searchNearby = async () => false;
         document.getElementById('installations-search-btn').click();
         await new Promise((resolve) => setTimeout(resolve, 50));
         const installationSearchFalseMessage = document.getElementById('toast').textContent;
-        const installationSearchFalseReleased = !document.getElementById('installations-search-btn').disabled;
+        const installationSearchFalseReleased = document.getElementById('installations-search-btn').getAttribute('aria-busy') === 'false';
         await new Promise((resolve) => setTimeout(resolve, 0));
         return {
           semanticFalseMessage,
@@ -1109,10 +1198,10 @@ async function main() {
         dataManager.restoreEnabledLayerIds = originalRestoreEnabledLayerIds;
         dataManager.isEnabled = originalIsEnabled;
         dataManager.isEffectivelyEnabled = originalIsEffectivelyEnabled;
-        styleManager._clearLayersOutsideContextMode = originalClear;
-        styleManager._captureContextSessionSnapshot = originalCapture;
-        styleManager._contextMode = originalContextMode;
-        styleManager._contextSessionSnapshot = originalSnapshot;
+        styleManager._contextControls._clearLayersOutsideContextMode = originalClear;
+        styleManager._contextControls._captureContextSessionSnapshot = originalCapture;
+        styleManager._contextControls._contextMode = originalContextMode;
+        styleManager._contextControls._contextSessionSnapshot = originalSnapshot;
         styleManager._showToast = originalShowToast;
         if (installations) installations.searchNearby = originalSearchNearby;
         window.removeEventListener('unhandledrejection', onUnhandled);
@@ -1121,7 +1210,7 @@ async function main() {
     check(
       'user-facing chip, real Context entry rollback, and installation Search failures settle safely',
       userFacingFailures.semanticFalseMessage === 'Radio could not stop cleanly'
-        && userFacingFailures.contextFailures.length === 8
+        && userFacingFailures.contextFailures.length === 4
         && userFacingFailures.contextFailures.every((failure) => (
           failure.result === false
           && failure.visibleMode === null
@@ -1129,10 +1218,9 @@ async function main() {
           && failure.priorLayerRestored
           && !failure.entryEnabled
           && !failure.flightsButtonDisabled
-          && !failure.missionsButtonDisabled
           && failure.message.includes('QA transition failed')
         ))
-        && userFacingFailures.directEntryFailures.length === 4
+        && userFacingFailures.directEntryFailures.length === 2
         && userFacingFailures.directEntryFailures.every((failure) => (
           failure.reason.includes('could not start')
           && failure.retryReason === null
@@ -1143,14 +1231,14 @@ async function main() {
           && failure.priorLayerRestored
           && !failure.modeChanging
         ))
-        && userFacingFailures.directActivationFailures.length === 2
+        && userFacingFailures.directActivationFailures.length === 1
         && userFacingFailures.directActivationFailures.every((failure) => (
           failure.mode === null
           && failure.snapshotCleared
           && failure.priorLayerRestored
           && failure.failedLayerDisabled
         ))
-        && userFacingFailures.directActivationRollbackFailures.length === 2
+        && userFacingFailures.directActivationRollbackFailures.length === 1
         && userFacingFailures.directActivationRollbackFailures.every((failure) => (
           failure.toastMessages.length === 1
           && failure.toastMessages[0] === `${failure.layerId} could not start cleanly`
@@ -1209,12 +1297,10 @@ async function main() {
     });
     await page.select('#radio-filter', 'all');
     const allPalette = await page.evaluate(() => {
-      const source = Array.from({ length: window.__godsEyeView.viewer.dataSources.length }, (_, index) => (
-        window.__godsEyeView.viewer.dataSources.get(index)
-      )).find((item) => item.name === 'Radio stations');
+      const rows = new Map(window.__qaRadioRows('stations').map((row) => [row.id, row]));
       const colorFor = (index) => {
         const id = `radio:00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
-        const color = source?.entities.getById(id)?.point?.color?.getValue?.();
+        const color = rows.get(id)?.primitive.color;
         return color ? [color.red, color.green, color.blue].map((value) => Math.round(value * 255)) : null;
       };
       return { news: colorFor(0), talk: colorFor(1), music: colorFor(7) };
@@ -1230,11 +1316,7 @@ async function main() {
     const clusterBadge = await page.evaluate(async () => {
       const viewer = window.__godsEyeView.viewer;
       const { getOverlayPaintRect, getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
-      const { distanceFade } = await import('/src/overlays/worldOverlayDraw.js');
-      const { radioStationIdFromPick } = await import('/src/data/radio.js');
       const baselineSolveRevision = getWorldOverlayDiagnostics().solveRevision;
-      const source = Array.from({ length: viewer.dataSources.length }, (_, index) => viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations');
       const ellipsoid = viewer.scene.globe.ellipsoid;
       viewer.camera.cancelFlight();
       viewer.camera.setView({
@@ -1245,26 +1327,25 @@ async function main() {
         }),
         orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
       });
-      source.clustering.enabled = false;
       viewer.scene.requestRender();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The camera's move clusters the stations again: wait for a cluster dot.
       return new Promise((resolve) => {
-        const originalPixelRange = source.clustering.pixelRange;
-        const timeout = setTimeout(() => {
-          remove();
-          resolve(null);
-        }, 2_000);
-        const remove = source.clustering.clusterEvent.addEventListener(async (entities, cluster) => {
-          clearTimeout(timeout);
-          remove();
+        const started = performance.now();
+        const poll = async () => {
+          const cluster = window.__qaRadioRows('clusters').find((row) => row.show);
+          if (!cluster) {
+            if (performance.now() - started > 2_000) resolve(null);
+            else setTimeout(poll, 50);
+            return;
+          }
+          // The cluster's dot is a draw-port point, which draws no label.
           const native = {
-            count: entities.length,
-            labelShow: cluster.label.show,
-            labelText: cluster.label.text,
-            pointSize: cluster.point.pixelSize,
-            pointMaxDistance: cluster.point.distanceDisplayCondition?.far ?? null,
+            count: cluster.meta.stationIds.length,
+            labelShow: cluster.primitive.text !== undefined,
+            labelText: cluster.primitive.text ?? '',
+            pointSize: cluster.primitive.pixelSize,
+            pointMaxDistance: cluster.primitive.distanceDisplayCondition?.far ?? null,
           };
-          source.clustering.pixelRange = originalPixelRange;
           const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
           await new Promise((done) => setTimeout(done, 0));
           let painted = null;
@@ -1301,9 +1382,8 @@ async function main() {
             source: radio.getOverlayDiagnostics(),
             host: painted?.host || getWorldOverlayDiagnostics(),
           });
-        });
-        source.clustering.enabled = true;
-        viewer.scene.requestRender();
+        };
+        poll();
       });
     });
     check(
@@ -1320,12 +1400,9 @@ async function main() {
         && clusterBadge?.rect?.h > 0,
       JSON.stringify(clusterBadge),
     );
-    const highGlobalClusterLabels = await page.evaluate(async () => {
+    await page.evaluate(async () => {
       const viewer = window.__godsEyeView.viewer;
-      const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
       const ellipsoid = viewer.scene.globe.ellipsoid;
-      const { getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
-      const { distanceFade } = await import('/src/overlays/worldOverlayDraw.js');
       viewer.camera.cancelFlight();
       viewer.camera.setView({
         destination: ellipsoid.cartographicToCartesian({
@@ -1337,6 +1414,14 @@ async function main() {
       });
       viewer.scene.requestRender();
       await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    await settleRadioFrames(page);
+    const highGlobalClusterLabels = await page.evaluate(async () => {
+      const viewer = window.__godsEyeView.viewer;
+      const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
+      const ellipsoid = viewer.scene.globe.ellipsoid;
+      const { getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
+      const { distanceFade } = await import('/src/overlays/worldOverlayDraw.js');
       const source = radio.getOverlayDiagnostics();
       const cameraPosition = viewer.camera.positionWC;
       const cameraRadius = Math.hypot(cameraPosition.x, cameraPosition.y, cameraPosition.z);
@@ -1344,14 +1429,24 @@ async function main() {
         0,
         cameraRadius * cameraRadius - ellipsoid.maximumRadius * ellipsoid.maximumRadius,
       ));
-      const points = Array.from({ length: viewer.dataSources.length }, (_, index) => viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations')?.clustering?._clusterPointCollection;
       let clusterPoint = null;
-      for (let index = 0; index < (points?.length || 0); index += 1) {
-        const point = points.get(index);
-        if (!point?.show || !Array.isArray(point.id) || !point.id.length) continue;
+      // Choose an on-screen cluster dot independently of the native pick
+      // result being tested.
+      const visiblePoints = [];
+      for (const row of window.__qaRadioRows('clusters')) {
+        const point = row.primitive;
+        if (!row.show || !row.meta?.stationIds?.length) continue;
         const anchor = viewer.scene.cartesianToCanvasCoordinates(point.position);
         if (!anchor) continue;
+        if (anchor.x < 0 || anchor.y < 0 || anchor.x > viewer.canvas.clientWidth || anchor.y > viewer.canvas.clientHeight) continue;
+        visiblePoints.push({ point, anchor });
+      }
+      visiblePoints.sort((a, b) => (
+        Math.hypot(a.anchor.x - viewer.canvas.clientWidth / 2, a.anchor.y - viewer.canvas.clientHeight / 2)
+        - Math.hypot(b.anchor.x - viewer.canvas.clientWidth / 2, b.anchor.y - viewer.canvas.clientHeight / 2)
+      ));
+      if (visiblePoints.length) {
+        const { point, anchor } = visiblePoints[0];
         const exactPick = (viewer.scene.drillPick(anchor, 16) || []).find((picked) => (
           picked?.primitive === point && picked?.id === point.id
         ));
@@ -1359,7 +1454,6 @@ async function main() {
           maxDistance: point.distanceDisplayCondition?.far ?? null,
           pickable: Boolean(exactPick),
         };
-        break;
       }
       return {
         source,
@@ -1506,112 +1600,9 @@ async function main() {
       JSON.stringify(directoryRefreshContinuity),
     );
     await page.select('#radio-filter', 'news');
-    check('launcher enables Radio without forcing Context open', !initial.panelExpanded && !initial.contextExpanded && initial.nestedInContext);
+    check('enabled Radio stays nested in Context and leaves both panels collapsed', !initial.panelExpanded && !initial.contextExpanded && initial.nestedInContext);
     check('full Play is available before a station is selected', !initial.state.selected && initial.fullPlayEnabled && initial.fullPlayLabel === 'Play nearest radio station');
 
-    const hoverOnlyDisclosure = await page.evaluate(() => {
-      const button = document.getElementById('context-radio-toggle-btn');
-      if (button.getAttribute('aria-expanded') === 'true') button.click();
-      return {
-        expanded: button.getAttribute('aria-expanded'),
-        hidden: document.getElementById('context-radio-mini').hidden,
-      };
-    });
-    await page.hover('#context-radio-toggle-btn');
-    await sleep(100);
-    const hoverOnlyVisible = await page.$eval('#context-radio-mini', (mini) => (
-      !mini.hidden && getComputedStyle(mini).display !== 'none'
-    ));
-    check(
-      'hover alone does not disclose compact Radio controls',
-      hoverOnlyDisclosure.expanded === 'false' && hoverOnlyDisclosure.hidden && !hoverOnlyVisible,
-      JSON.stringify({ hoverOnlyDisclosure, hoverOnlyVisible }),
-    );
-    await page.click('#context-radio-toggle-btn');
-    await page.waitForFunction(() => {
-      const button = document.getElementById('context-radio-toggle-btn');
-      const mini = document.getElementById('context-radio-mini');
-      return button.getAttribute('aria-expanded') === 'true'
-        && !mini.hidden && getComputedStyle(mini).display !== 'none';
-    });
-    const compact = await page.evaluate(() => {
-      const mini = document.getElementById('context-radio-mini');
-      const toggle = document.getElementById('context-radio-toggle-btn');
-      const dock = document.getElementById('context-radio-dock');
-      const miniRect = mini.getBoundingClientRect();
-      const toggleRect = toggle.getBoundingClientRect();
-      const miniStyle = getComputedStyle(mini);
-      return {
-        visible: miniStyle.display !== 'none' && miniRect.width > 0 && miniRect.height > 0,
-        display: miniStyle.display,
-        visibility: miniStyle.visibility,
-        opacity: miniStyle.opacity,
-        miniRect: { top: miniRect.top, left: miniRect.left, width: miniRect.width, height: miniRect.height },
-        toggleRect: { top: toggleRect.top, left: toggleRect.left, width: toggleRect.width, height: toggleRect.height },
-        dockRect: (() => {
-          const rect = dock.getBoundingClientRect();
-          return { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
-        })(),
-        offsetParent: mini.offsetParent?.id || mini.offsetParent?.className || null,
-        prevEnabled: !document.getElementById('context-radio-mini-prev-btn').disabled,
-        playEnabled: !document.getElementById('context-radio-mini-play-btn').disabled,
-        playLabel: document.getElementById('context-radio-mini-play-btn').getAttribute('aria-label'),
-        nextEnabled: !document.getElementById('context-radio-mini-next-btn').disabled,
-        volumeEnabled: !document.getElementById('context-radio-mini-volume').disabled,
-        offsetBelowToggle: Math.round(miniRect.top - toggleRect.bottom),
-      };
-    });
-    check(
-      'explicit launcher disclosure reveals enabled compact Radio controls',
-      compact.visible && compact.prevEnabled && compact.playEnabled && compact.nextEnabled && compact.volumeEnabled,
-      JSON.stringify(compact),
-    );
-    check('compact Play is available before a station is selected', compact.playLabel === 'Play nearest radio station');
-    check('compact Radio controls sit 20px below the launcher', compact.offsetBelowToggle === 20, `${compact.offsetBelowToggle}px`);
-    const compactCloseDisclosure = await page.evaluate(() => {
-      const launcher = document.getElementById('context-radio-toggle-btn');
-      const close = document.getElementById('context-radio-mini-close-btn');
-      close.focus();
-      close.click();
-      const result = {
-        launcherExpanded: launcher.getAttribute('aria-expanded'),
-        compactHidden: document.getElementById('context-radio-mini').hidden,
-        focusRestored: document.activeElement === launcher,
-        radioCollapsed: document.getElementById('radio-panel').classList.contains('collapsed'),
-      };
-      launcher.click();
-      return result;
-    });
-    check(
-      'dedicated compact close hides only the compact Radio disclosure and restores launcher focus',
-      compactCloseDisclosure.launcherExpanded === 'false'
-        && compactCloseDisclosure.compactHidden
-        && compactCloseDisclosure.focusRestored
-        && compactCloseDisclosure.radioCollapsed,
-      JSON.stringify(compactCloseDisclosure),
-    );
-    const compactTouchDisclosure = await page.evaluate(() => {
-      const button = document.getElementById('context-radio-toggle-btn');
-      button.click();
-      const closed = button.getAttribute('aria-expanded') === 'false'
-        && document.getElementById('context-radio-mini').hidden;
-      button.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true,
-        pointerType: 'touch',
-        isPrimary: true,
-      }));
-      button.click();
-      return {
-        closed,
-        reopened: button.getAttribute('aria-expanded') === 'true'
-          && !document.getElementById('context-radio-mini').hidden,
-      };
-    });
-    check(
-      'touch/coarse-pointer activation can close and reopen compact Radio controls',
-      compactTouchDisclosure.closed && compactTouchDisclosure.reopened,
-      JSON.stringify(compactTouchDisclosure),
-    );
     const multiExpandedPanelLayout = await page.evaluate(async () => {
       const manager = window.__godsEyeView.styleManager;
       const ids = ['data-panel', 'scene-panel', 'pp-toggles', 'cctv-panel', 'global-context-panel'];
@@ -1632,8 +1623,8 @@ async function main() {
             dataset: { ...stack.dataset },
           }];
         })),
-        preferredLeftPanelId: manager._leftStackPreferredPanelId,
-        preferredRightPanelId: manager._rightStackPreferredPanelId,
+        preferredLeftPanelId: manager._panelLayout._leftStackPreferredPanelId,
+        preferredRightPanelId: manager._panelLayout._rightStackPreferredPanelId,
         hudMode: manager.hud.getMode(),
         hudVariant: manager.hud.getVariant(),
         focusId: document.activeElement?.id || null,
@@ -1697,7 +1688,7 @@ async function main() {
         const scenePanel = document.getElementById('scene-panel');
         const contextPanel = document.getElementById('global-context-panel');
         result.tacticalAutoCollapse = {
-          latestOpenedPanel: manager._leftStackPreferredPanelId,
+          latestOpenedPanel: manager._panelLayout._leftStackPreferredPanelId,
           scenesExpanded: !scenePanel.classList.contains('collapsed'),
           dataCollapsed: dataPanel.classList.contains('layout-auto-collapsed'),
           dataHiddenWhileScenesOwnsLane: dataPanel.getBoundingClientRect().height === 0
@@ -1744,13 +1735,13 @@ async function main() {
         manager.hud.setMode(prior.hudMode);
         manager._updateHudButtonState();
         await new Promise((resolve) => setTimeout(resolve, 320));
-        if (manager._leftStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._leftStackLayoutFrame);
-          manager._leftStackLayoutFrame = null;
+        if (manager._panelLayout._leftStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._leftStackLayoutFrame);
+          manager._panelLayout._leftStackLayoutFrame = null;
         }
-        if (manager._rightStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._rightStackLayoutFrame);
-          manager._rightStackLayoutFrame = null;
+        if (manager._panelLayout._rightStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._rightStackLayoutFrame);
+          manager._panelLayout._rightStackLayoutFrame = null;
         }
         for (const [id, state] of Object.entries(prior.panels)) {
           const panel = document.getElementById(id);
@@ -1759,7 +1750,14 @@ async function main() {
           else panel.setAttribute('style', state.style);
           if (state.ariaHidden === null) panel.removeAttribute('aria-hidden');
           else panel.setAttribute('aria-hidden', state.ariaHidden);
-          manager._syncPanelCollapseButton(panel);
+          // The restored classes are the panel's state again.
+          const has = (name) => panel.classList.contains(name);
+          manager._presentPanel(panel, {
+            collapsed: has('collapsed'),
+            pinned: has('dock-pinned'),
+            pinnedTop: has('dock-pinned-top'),
+            auto: has('layout-auto-collapsed') ? 'layout' : has('accordion-collapsed') ? 'accordion' : null,
+          });
         }
         for (const [id, state] of Object.entries(prior.stacks)) {
           const stack = document.getElementById(id);
@@ -1769,18 +1767,18 @@ async function main() {
           for (const key of Object.keys(stack.dataset)) delete stack.dataset[key];
           Object.assign(stack.dataset, state.dataset);
         }
-        manager._leftStackPreferredPanelId = prior.preferredLeftPanelId;
-        manager._rightStackPreferredPanelId = prior.preferredRightPanelId;
+        manager._panelLayout._leftStackPreferredPanelId = prior.preferredLeftPanelId;
+        manager._panelLayout._rightStackPreferredPanelId = prior.preferredRightPanelId;
         localStorage.clear();
         for (const [key, value] of Object.entries(prior.storage)) localStorage.setItem(key, value);
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        if (manager._leftStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._leftStackLayoutFrame);
-          manager._leftStackLayoutFrame = null;
+        if (manager._panelLayout._leftStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._leftStackLayoutFrame);
+          manager._panelLayout._leftStackLayoutFrame = null;
         }
-        if (manager._rightStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._rightStackLayoutFrame);
-          manager._rightStackLayoutFrame = null;
+        if (manager._panelLayout._rightStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._rightStackLayoutFrame);
+          manager._panelLayout._rightStackLayoutFrame = null;
         }
         // Disclosure restoration can wake the installed layout observers. Let
         // those observers settle, then restore the captured stack presentation
@@ -1810,8 +1808,8 @@ async function main() {
         result.restoreDetails = {
           panelsRestored,
           stacksRestored,
-          preferredPanelRestored: manager._leftStackPreferredPanelId === prior.preferredLeftPanelId,
-          preferredRightPanelRestored: manager._rightStackPreferredPanelId === prior.preferredRightPanelId,
+          preferredPanelRestored: manager._panelLayout._leftStackPreferredPanelId === prior.preferredLeftPanelId,
+          preferredRightPanelRestored: manager._panelLayout._rightStackPreferredPanelId === prior.preferredRightPanelId,
           hudModeRestored: manager.hud.getMode() === prior.hudMode,
           hudVariantRestored: manager.hud.getVariant() === prior.hudVariant,
           storageRestored: JSON.stringify(Object.fromEntries(Object.entries(localStorage))) === JSON.stringify(prior.storage),
@@ -1875,7 +1873,10 @@ async function main() {
         hudVariant: manager.hud.getVariant(),
         focusId: document.activeElement?.id || null,
       };
-      const waitForLayout = () => new Promise((resolve) => setTimeout(resolve, 320));
+      const waitForLayout = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 320));
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      };
       const cases = [];
 
       manager.setPanelCollapsed('global-context-panel', true);
@@ -1952,7 +1953,25 @@ async function main() {
       // owns the real tracked-aircraft camera session. Hold the frame update so
       // the intentionally synthetic Cockpit shell is not auto-exited mid-check.
       const realCockpitUpdate = manager.cockpitView.update;
-      const waitForLayout = () => new Promise((resolve) => setTimeout(resolve, 320));
+      const intelHud = document.getElementById('intel-hud');
+      const priorHudTransition = intelHud.style.getPropertyValue('transition');
+      const priorHudTransitionPriority = intelHud.style.getPropertyPriority('transition');
+      const waitForLayout = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 320));
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      };
+      const waitForHudSettle = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 560));
+        // Let panel changes settle. qa-cockpit-utility covers scheduling with
+        // the real tracked-aircraft controller; this synthetic shell pauses it.
+        intelHud.getBoundingClientRect();
+        // This fixture pauses the controller update. Run its actual layout
+        // methods against the settled HUD, then measure both unchanged lanes.
+        manager.cockpitView.syncContextLayout();
+        manager.cockpitView.syncSignalLayout();
+        manager._syncLeftPanelAdaptiveLayout();
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      };
       const prior = {
         cockpit: document.body.classList.contains('cockpit-mode'),
         cockpitActive: manager.cockpitView.active,
@@ -1966,12 +1985,11 @@ async function main() {
         hudVariant: manager.hud.getVariant(),
         displayExpanded: display.getAttribute('aria-expanded') === 'true',
         radioExpanded: radio.getAttribute('aria-expanded') === 'true',
-        contextRadioExpanded: document.getElementById('context-radio-toggle-btn')?.getAttribute('aria-expanded') === 'true',
         focusId: document.activeElement?.id || null,
         detectionMode: manager.getDetectionState().detectionMode,
         models3dEnabled: manager._models3dEnabled,
         models3dMode: manager._models3dMode,
-        preferredLeftPanelId: manager._leftStackPreferredPanelId,
+        preferredLeftPanelId: manager._panelLayout._leftStackPreferredPanelId,
         panels: Object.fromEntries([
           'data-panel',
           'global-context-panel',
@@ -1989,12 +2007,15 @@ async function main() {
       let result = {};
       try {
         manager.cockpitView.update = () => {};
+        // This block measures settled panel geometry, not fade timing. The
+        // synthetic paused controller cannot advance layout during a HUD fade.
+        intelHud.style.setProperty('transition', 'none', 'important');
         document.body.classList.add('cockpit-mode');
       manager.cockpitView.active = true;
       manager._setCockpitDisplayPortalActive(true);
       hud.hidden = false;
       signal.hidden = false;
-      dataPanel.classList.remove('collapsed');
+      manager._presentPanel(dataPanel, { collapsed: false });
       window.__godsEyeView.styleManager._syncLeftPanelAdaptiveLayout();
       window.__godsEyeView.styleManager.cockpitView.syncSignalLayout();
       if (display.getAttribute('aria-expanded') === 'true') display.click();
@@ -2002,7 +2023,7 @@ async function main() {
       manager._setHudVariant('tactical');
       manager.hud.setMode('on');
       manager._updateHudButtonState();
-      await waitForLayout();
+      await waitForHudSettle();
 
       const layoutSteps = [];
       // The two Cockpit lanes are solved independently: the accordion against
@@ -2055,17 +2076,17 @@ async function main() {
           layoutMode: document.getElementById('left-panel-stack').dataset.layoutMode,
         });
       };
-      // The Intel HUD fades over 400ms and keeps its readout rects for the
-      // whole transition, so both lanes are measured only once it has settled.
-      const waitForHudSettle = () => new Promise((resolve) => setTimeout(resolve, 560));
+      // Both lanes are measured against the settled HUD variant.
       for (let index = 0; index < 5; index += 1) {
         recordLayoutStep();
         if (index < 4) {
-          if (index < 2) {
-            hudLayout.value = index === 0 ? 'operator' : 'minimal';
-            hudLayout.dispatchEvent(new Event('change', { bubbles: true }));
-          } else {
+          // Off and back on in Minimal, so the toggle must restore a
+          // non-default layout before the cycle returns to Tactical.
+          if (index === 1 || index === 2) {
             hudToggle.click();
+          } else {
+            hudLayout.value = index === 0 ? 'minimal' : 'tactical';
+            hudLayout.dispatchEvent(new Event('change', { bubbles: true }));
           }
           await waitForHudSettle();
         }
@@ -2079,8 +2100,7 @@ async function main() {
       contextCard.hidden = false;
       // Expand the panel the same way this block already does at entry, so the
       // portaled Display groups measured further down keep their DOM home.
-      dataPanel.classList.remove('collapsed', 'layout-auto-collapsed');
-      manager._syncPanelCollapseButton(dataPanel);
+      manager._presentPanel(dataPanel, { collapsed: false, auto: null });
       manager._syncLeftPanelAdaptiveLayout();
       await waitForLayout();
       const panelRect = dataPanel.getBoundingClientRect();
@@ -2174,24 +2194,27 @@ async function main() {
         .every((control) => control.closest('.pp-toggle-group')?.parentElement
           ?.closest('#cockpit-display-panel'));
       display.click();
+      await waitForLayout();
 
       manager.cockpitView.syncSignalLayout();
       radio.click();
+      await waitForLayout();
       const radioOpened = radio.getAttribute('aria-expanded') === 'true'
         && !document.getElementById('cockpit-radio-panel').hidden;
       const mutuallyExclusive = display.getAttribute('aria-expanded') === 'false';
       radio.click();
+      await waitForLayout();
 
       manager.cockpitView.syncSignalLayout();
       radio.click();
+      await waitForLayout();
 
       const radioNavigationAvailable = [
         document.getElementById('cockpit-radio-prev-btn'),
         document.getElementById('cockpit-radio-next-btn'),
       ].every((button) => button?.isConnected && !button.disabled);
       const detailsExcluded = !document.querySelector(
-        '#cockpit-radio-panel #context-radio-details-btn, '
-        + '#cockpit-radio-panel #radio-filter, #cockpit-radio-panel #radio-tuner',
+        '#cockpit-radio-panel #radio-filter, #cockpit-radio-panel #radio-tuner',
       );
       const scenesHidden = getComputedStyle(scene).display === 'none';
       radio.click();
@@ -2208,19 +2231,23 @@ async function main() {
         const stableTop = utility.getBoundingClientRect().top;
         const transitionTops = [];
         let sampling = true;
+        let sampleFrame = null;
         const sampleTop = () => {
+          if (!sampling) return;
           transitionTops.push(utility.getBoundingClientRect().top);
-          if (sampling) requestAnimationFrame(sampleTop);
+          sampleFrame = requestAnimationFrame(sampleTop);
         };
-        requestAnimationFrame(sampleTop);
+        sampleFrame = requestAnimationFrame(sampleTop);
         await manager._setMapStack('osm', { syncShare: false });
         await waitForLayout();
         sampling = false;
+        cancelAnimationFrame(sampleFrame);
         mapProviderUtilityStable = transitionTops.length > 1
           && transitionTops.every((top) => Math.abs(top - stableTop) < 1);
       }
       result = {
         cockpitPanelInteraction,
+        layoutSteps,
         displayOpened,
         sharedDisplayControlsPortaled,
         radioOpened,
@@ -2230,7 +2257,7 @@ async function main() {
         scenesHidden,
         mapProviderUtilityStable,
         hudInteractionsExact: layoutSteps.map((step) => step.hud).join('>')
-          === 'TACTICAL>OPERATOR>MINIMAL>OFF>MINIMAL',
+          === 'TACTICAL>MINIMAL>OFF>MINIMAL>TACTICAL',
         // The accordion clears the topline, Cockpit cards, and Cesium credits
         // across every HUD layout. Its list owns any overflow internally.
         leftLaneClearAcrossHudCycle: layoutSteps.every((step) => (
@@ -2269,6 +2296,8 @@ async function main() {
         manager._setModels3dEnabled(prior.models3dEnabled);
         manager._setHudVariant(prior.hudVariant);
         manager.hud.setMode(prior.hudMode);
+        if (priorHudTransition) intelHud.style.setProperty('transition', priorHudTransition, priorHudTransitionPriority);
+        else intelHud.style.removeProperty('transition');
         manager._updateHudButtonState();
         manager.cockpitView.active = prior.cockpitActive;
         manager.cockpitView.update = realCockpitUpdate;
@@ -2278,19 +2307,18 @@ async function main() {
         manager.setPanelCollapsed('global-context-panel', prior.contextCollapsed);
         if (display.getAttribute('aria-expanded') !== String(prior.displayExpanded)) display.click();
         if (radio.getAttribute('aria-expanded') !== String(prior.radioExpanded)) radio.click();
-        manager._setRadioDisclosure(prior.contextRadioExpanded);
         hud.hidden = prior.hudHidden;
         signal.hidden = prior.signalHidden;
         if (prior.utilityTop) hud.style.setProperty('--cockpit-utility-top', prior.utilityTop);
         else hud.style.removeProperty('--cockpit-utility-top');
         await waitForLayout();
-        if (manager._leftStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._leftStackLayoutFrame);
-          manager._leftStackLayoutFrame = null;
+        if (manager._panelLayout._leftStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._leftStackLayoutFrame);
+          manager._panelLayout._leftStackLayoutFrame = null;
         }
-        if (manager._rightStackLayoutFrame !== null) {
-          cancelAnimationFrame(manager._rightStackLayoutFrame);
-          manager._rightStackLayoutFrame = null;
+        if (manager._panelLayout._rightStackLayoutFrame !== null) {
+          cancelAnimationFrame(manager._panelLayout._rightStackLayoutFrame);
+          manager._panelLayout._rightStackLayoutFrame = null;
         }
         for (const [id, state] of Object.entries(prior.panels)) {
           const panel = document.getElementById(id);
@@ -2299,9 +2327,16 @@ async function main() {
           else panel.setAttribute('style', state.style);
           if (state.ariaHidden === null) panel.removeAttribute('aria-hidden');
           else panel.setAttribute('aria-hidden', state.ariaHidden);
-          manager._syncPanelCollapseButton(panel);
+          // The restored classes are the panel's state again.
+          const has = (name) => panel.classList.contains(name);
+          manager._presentPanel(panel, {
+            collapsed: has('collapsed'),
+            pinned: has('dock-pinned'),
+            pinnedTop: has('dock-pinned-top'),
+            auto: has('layout-auto-collapsed') ? 'layout' : has('accordion-collapsed') ? 'accordion' : null,
+          });
         }
-        manager._leftStackPreferredPanelId = prior.preferredLeftPanelId;
+        manager._panelLayout._leftStackPreferredPanelId = prior.preferredLeftPanelId;
         localStorage.clear();
         for (const [key, value] of Object.entries(prior.storage)) localStorage.setItem(key, value);
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -2313,9 +2348,10 @@ async function main() {
           && document.getElementById('global-context-panel').classList.contains('collapsed') === prior.contextCollapsed
           && display.getAttribute('aria-expanded') === String(prior.displayExpanded)
           && radio.getAttribute('aria-expanded') === String(prior.radioExpanded)
-          && document.getElementById('context-radio-toggle-btn')?.getAttribute('aria-expanded') === String(prior.contextRadioExpanded)
           && hud.hidden === prior.hudHidden
           && signal.hidden === prior.signalHidden
+          && intelHud.style.getPropertyValue('transition') === priorHudTransition
+          && intelHud.style.getPropertyPriority('transition') === priorHudTransitionPriority
           && manager.hud.getMode() === prior.hudMode
           && manager.hud.getVariant() === prior.hudVariant
           && Object.entries(prior.panels).every(([id, state]) => {
@@ -2324,7 +2360,7 @@ async function main() {
               && panel.getAttribute('style') === state.style
               && panel.getAttribute('aria-hidden') === state.ariaHidden;
           })
-          && manager._leftStackPreferredPanelId === prior.preferredLeftPanelId
+          && manager._panelLayout._leftStackPreferredPanelId === prior.preferredLeftPanelId
           && JSON.stringify(Object.fromEntries(Object.entries(localStorage))) === JSON.stringify(prior.storage)
           && (!prior.focusId || document.activeElement?.id === prior.focusId);
       }
@@ -2367,21 +2403,20 @@ async function main() {
     check('first Play scenario starts without a leaked Radio selection', firstPlayPrecondition === null,
       `selected=${firstPlayPrecondition}`);
     await page.select('#radio-filter', 'all');
-    await page.$eval('#context-radio-toggle-btn', (button) => {
-      if (button.getAttribute('aria-expanded') !== 'true') button.click();
-    });
     await page.evaluate(() => {
       const camera = window.__godsEyeView.viewer.camera;
       window.__qaFirstPlayFlyToCalls = [];
       window.__qaFirstPlayOriginalFlyTo = camera.flyTo;
       camera.flyTo = (options) => window.__qaFirstPlayFlyToCalls.push(options);
-      document.getElementById('context-radio-toggle-btn').focus();
     });
-    await page.$eval('#context-radio-mini-play-btn', (button) => button.click());
+    const firstPlayPanels = await revealRadioControls(page, 'radio-play-btn');
+    await page.focus('#radio-play-btn');
+    await page.click('#radio-play-btn');
     await page.waitForFunction(() => {
       const state = window.__godsEyeView.dataManager.layers.get('radio').module.getUIState();
       return state.audioState === 'playing' || state.audioState === 'error';
     });
+    await restoreRadioPanels(page, firstPlayPanels);
     const postMicroDragPlayback = await page.evaluate(async () => {
       const mod = window.__godsEyeView.dataManager.layers.get('radio').module;
       let state = mod.getUIState();
@@ -2431,26 +2466,23 @@ async function main() {
     await sleep(700);
     const newsClusterTarget = await page.evaluate(() => {
       const gev = window.__godsEyeView;
-      const source = Array.from({ length: gev.viewer.dataSources.length }, (_, index) => gev.viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations');
-      const points = source.clustering._clusterPointCollection;
-      for (let index = 0; index < (points?.length || 0); index += 1) {
-        const point = points.get(index);
-        if (!point.show || !Array.isArray(point.id) || !point.id.length) continue;
-        const canvasPoint = gev.viewer.scene.cartesianToCanvasCoordinates(point.position);
+      const rows = window.__qaRadioRows('clusters');
+      for (const row of rows) {
+        if (!row.show || !row.meta?.stationIds?.length) continue;
+        const canvasPoint = gev.viewer.scene.cartesianToCanvasCoordinates(row.primitive.position);
         if (!canvasPoint) continue;
         return {
           x: canvasPoint.x,
           y: canvasPoint.y,
-          firstId: String(point.id[0]?.id || '').replace(/^radio:/, ''),
-          pointIds: point.id.map((entity) => entity.id),
+          firstId: row.meta.stationIds[0],
+          pointIds: row.meta.stationIds.map((id) => `radio:${id}`),
         };
       }
       return {
         missing: true,
-        points: Array.from({ length: points?.length || 0 }, (_, index) => ({
-          show: points.get(index).show,
-          pointIds: Array.isArray(points.get(index)?.id) ? points.get(index).id.length : 0,
+        points: rows.map((row) => ({
+          show: row.show,
+          pointIds: row.meta?.stationIds?.length || 0,
         })),
       };
     });
@@ -2488,59 +2520,19 @@ async function main() {
     );
     await page.select('#radio-filter', 'news');
 
-    await page.$eval('#context-radio-mini-volume', (input) => {
+    await page.$eval('#radio-volume', (input) => {
       input.value = '35';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    const compactVolume = await page.evaluate(() => ({
+    const radioVolume = await page.evaluate(() => ({
       volume: window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().volume,
       full: document.getElementById('radio-volume').value,
-      mini: document.getElementById('context-radio-mini-volume').value,
+      label: document.getElementById('radio-volume-value').textContent,
     }));
-    check('compact volume shares the full Radio player state', Math.abs(compactVolume.volume - 0.35) < 0.001 && compactVolume.full === '35' && compactVolume.mini === '35');
-
-    const compactDisclosureContinuity = await page.evaluate(async () => {
-      const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
-      const manager = window.__godsEyeView.styleManager;
-      manager.setPanelCollapsed('global-context-panel', true);
-      manager._setRadioDisclosure(true);
-      await radio.play({ origin: 'user' });
-      const before = radio.getUIState();
-      const disclosure = document.getElementById('context-radio-toggle-btn');
-      if (disclosure.getAttribute('aria-expanded') !== 'true') disclosure.click();
-      disclosure.click();
-      const closed = {
-        expanded: disclosure.getAttribute('aria-expanded'),
-        hidden: document.getElementById('context-radio-mini').hidden,
-        state: radio.getUIState(),
-      };
-      disclosure.click();
-      return {
-        before,
-        closed,
-        reopened: disclosure.getAttribute('aria-expanded'),
-        miniHidden: document.getElementById('context-radio-mini').hidden,
-        after: radio.getUIState(),
-      };
-    });
     check(
-      'compact disclosure preserves playback, station, filter, and volume continuity',
-      compactDisclosureContinuity.closed.expanded === 'false'
-        && compactDisclosureContinuity.closed.hidden
-        && compactDisclosureContinuity.reopened === 'true'
-        && !compactDisclosureContinuity.miniHidden
-        && compactDisclosureContinuity.before.audioState === 'playing'
-        && compactDisclosureContinuity.closed.state.audioState === 'playing'
-        && compactDisclosureContinuity.after.audioState === 'playing'
-        && compactDisclosureContinuity.after.selected?.id === compactDisclosureContinuity.before.selected?.id
-        && compactDisclosureContinuity.after.filter === compactDisclosureContinuity.before.filter
-        && compactDisclosureContinuity.after.volume === compactDisclosureContinuity.before.volume,
-      JSON.stringify({
-        before: compactDisclosureContinuity.before,
-        closed: compactDisclosureContinuity.closed,
-        reopened: compactDisclosureContinuity.reopened,
-        after: compactDisclosureContinuity.after,
-      }),
+      'full Radio volume drives the Radio player state',
+      Math.abs(radioVolume.volume - 0.35) < 0.001 && radioVolume.full === '35' && radioVolume.label === '35%',
+      JSON.stringify(radioVolume),
     );
 
     const voicePause = await page.evaluate(async () => {
@@ -2604,11 +2596,13 @@ async function main() {
       idleVoice.audioState === 'paused',
       idleVoice.audioState,
     );
-    const manualPlayTarget = await page.evaluate(() => {
+    const manualPlayTarget = await page.evaluate(async () => {
       const manager = window.__godsEyeView.styleManager;
-      manager.setPanelCollapsed('global-context-panel', true);
-      manager._setRadioDisclosure(true);
-      const button = document.getElementById('context-radio-mini-play-btn');
+      manager.setPanelCollapsed('global-context-panel', false);
+      manager.setPanelCollapsed('radio-panel', false);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const button = document.getElementById('radio-play-btn');
+      button.scrollIntoView({ block: 'nearest' });
       const rect = button.getBoundingClientRect();
       const style = getComputedStyle(button);
       return {
@@ -2623,12 +2617,12 @@ async function main() {
       };
     });
     check(
-      'manual voice takeover targets the visible compact Radio Play control',
+      'manual voice takeover targets the visible full Radio Play control',
       manualPlayTarget.visible && manualPlayTarget.enabled,
       JSON.stringify(manualPlayTarget),
     );
     if (manualPlayTarget.visible && manualPlayTarget.enabled) {
-      await page.click('#context-radio-mini-play-btn');
+      await page.click('#radio-play-btn');
       await page.waitForFunction(() => (
         window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().audioState === 'playing'
         && window.__godsEyeView.voiceCommands.status === 'idle'
@@ -2652,9 +2646,18 @@ async function main() {
       const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
       await radio.play();
       const beforeSpace = radio.getUIState().audioState;
-      document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, code: 'Space', key: ' ' }));
+      // Simulate an already-started hold-Space session; click-started open mic
+      // deliberately ignores Space takeover, and short taps never claim voice.
+      // The provider facade forwards reads, not writes. Set the mounted
+      // controller's input owner; assigning on the facade only shadows it.
+      const controller = voice.session.adapter.controller;
+      const priorPushToTalkMode = controller.pushToTalkMode;
+      controller.pushToTalkMode = true;
+      document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, code: 'Space', key: ' ' }));
+      await new Promise((resolve) => setTimeout(resolve, 700));
       const afterSpace = radio.getUIState().audioState;
-      document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, code: 'Space', key: ' ' }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, code: 'Space', key: ' ' }));
+      controller.pushToTalkMode = priorPushToTalkMode;
       await radio.play();
       voice.setVoiceSpeaker('ai');
       return { beforeSpace, afterSpace, afterAi: radio.getUIState().audioState };
@@ -2667,7 +2670,6 @@ async function main() {
     await page.evaluate(() => window.__godsEyeView.voiceCommands.setStatus('idle', 'QA complete'));
     await page.evaluate(async () => {
       const manager = window.__godsEyeView.styleManager;
-      manager._setRadioDisclosure(false);
       manager.setPanelCollapsed('global-context-panel', false);
       manager.setPanelCollapsed('radio-panel', false);
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -2683,9 +2685,13 @@ async function main() {
     const horizon = await page.evaluate(async () => {
       const viewer = window.__godsEyeView.viewer;
       const ellipsoid = viewer.scene.globe.ellipsoid;
-      const source = Array.from({ length: viewer.dataSources.length }, (_, index) => viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations');
-      const visibleIds = () => source.entities.values.filter((entity) => entity.show).map((entity) => entity.id);
+      // A station dot standing in a cluster is hidden too; the cluster's
+      // dot draws its stations' ids.
+      const visibleIds = () => [
+        ...window.__qaRadioRows('stations').filter((row) => row.show).map((row) => row.id),
+        ...window.__qaRadioRows('clusters').filter((row) => row.show)
+          .flatMap((row) => row.meta.stationIds.map((id) => `radio:${id}`)),
+      ];
       const setView = (lon, lat = 0) => {
         viewer.camera.cancelFlight();
         viewer.camera.setView({
@@ -2719,7 +2725,7 @@ async function main() {
       const dialRect = document.querySelector('.radio-tuner-dial').getBoundingClientRect();
       const sliderRect = slider.getBoundingClientRect();
       const panelRect = document.querySelector('.radio-panel-inner').getBoundingClientRect();
-      const count = style._radioTunerStations.length;
+      const count = style._radioControls._radioTunerStations.length;
       const usable = sliderRect.width - 14;
       const xFor = (coordinate) => sliderRect.left + 7 + usable * coordinate / Math.max(1, count - 1);
       const pointer = (type, x, pointerId = 71) => slider.dispatchEvent(new PointerEvent(type, {
@@ -2731,8 +2737,7 @@ async function main() {
         buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1,
       }));
       const snapshot = () => {
-        const markerId = gev.viewer.entities.values
-          .find((entity) => String(entity.id).startsWith('radio:selected:'))?.id || null;
+        const markerId = window.__qaRadioSelected()?.id || null;
         return {
           slot: Number(slider.value),
           markerId,
@@ -2745,15 +2750,21 @@ async function main() {
         };
       };
       const playsBefore = window.__qaRadioPlayCalls.length;
-      const frozenSignature = style._radioTunerBandSignature;
+      const frozenSignature = style._radioControls._radioTunerBandSignature;
+      // The tuner renders from the Radio store; let Vue patch before reading.
+      const rendered = () => Promise.resolve();
       pointer('pointerdown', xFor(0));
+      await rendered();
       const left = snapshot();
       const centerCoordinate = (count - 1) / 2;
       pointer('pointermove', xFor(centerCoordinate));
+      await rendered();
       const center = snapshot();
       pointer('pointermove', xFor(centerCoordinate + 2));
+      await rendered();
       const shifted = snapshot();
       pointer('pointermove', xFor(count - 1));
+      await rendered();
       const right = snapshot();
       const shiftedByIndex = new Map(shifted.ticks.map((tick) => [tick.index, tick.x]));
       const sharedTick = center.ticks.find((tick) => shiftedByIndex.has(tick.index));
@@ -2765,14 +2776,14 @@ async function main() {
         visible: !document.getElementById('radio-tuner').hidden,
         stationCount: count,
         sliderMax: Number(slider.max),
-        bandFrozen: style._radioTunerBandSignature === frozenSignature,
+        bandFrozen: style._radioControls._radioTunerBandSignature === frozenSignature,
         left,
         center,
         shifted,
         right,
-        leftExpectedId: style._radioTunerStations[0]?.id || null,
-        centerExpectedId: style._radioTunerStations[Math.floor(centerCoordinate + 0.5)]?.id || null,
-        rightExpectedId: style._radioTunerStations[count - 1]?.id || null,
+        leftExpectedId: style._radioControls._radioTunerStations[0]?.id || null,
+        centerExpectedId: style._radioControls._radioTunerStations[Math.floor(centerCoordinate + 0.5)]?.id || null,
+        rightExpectedId: style._radioControls._radioTunerStations[count - 1]?.id || null,
         centerExpected: Math.floor(centerCoordinate + 0.5),
         tapeDelta,
         needleDelta,
@@ -2810,14 +2821,14 @@ async function main() {
         tapeDelta: absoluteTuner.tapeDelta,
       }),
     );
-    const tunerCancelRestore = await page.evaluate(() => {
+    const tunerCancelRestore = await page.evaluate(async () => {
       const gev = window.__godsEyeView;
       const style = gev.styleManager;
       const radio = gev.dataManager.layers.get('radio').module;
       const slider = document.getElementById('radio-tuner-slider');
       // Capture a fresh gesture's complete presentation anchor before moving
       // to a different absolute directory station.
-      const beforeStations = [...style._radioTunerStations];
+      const beforeStations = [...style._radioControls._radioTunerStations];
       const sliderRect = slider.getBoundingClientRect();
       const xFor = (index) => sliderRect.left + 7
         + (sliderRect.width - 14) * index / Math.max(1, beforeStations.length - 1);
@@ -2834,7 +2845,7 @@ async function main() {
       const flyToCalls = [];
       camera.flyTo = (options) => flyToCalls.push(options);
       const before = {
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
         ids: beforeStations.map((station) => station.id),
         slot: Number(slider.value),
         selectedId: radio.getUIState().selected?.id || null,
@@ -2843,15 +2854,17 @@ async function main() {
       const targetIndex = before.slot < beforeStations.length - 2 ? before.slot + 2 : before.slot - 2;
       pointer('pointerdown', before.slot);
       pointer('pointermove', targetIndex);
+      // The tuner renders from the Radio store; let Vue patch before reading.
+      await Promise.resolve();
       const shiftedSlot = Number(slider.value);
-      const previewBeforeCancel = gev.viewer.entities.values
-        .find((entity) => String(entity.id).startsWith('radio:selected:'))?.id || null;
+      const previewBeforeCancel = window.__qaRadioSelected()?.id || null;
       const flyToCallsBeforeCancel = flyToCalls.length;
       pointer('pointercancel', targetIndex);
-      const afterStations = style._radioTunerStations;
+      await Promise.resolve();
+      const afterStations = style._radioControls._radioTunerStations;
       const afterState = radio.getUIState();
       const after = {
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
         ids: afterStations.map((station) => station.id),
         slot: Number(slider.value),
         selectedId: afterState.selected?.id || null,
@@ -2860,8 +2873,7 @@ async function main() {
         tuningActive: afterState.tuningActive,
       };
       const flyToCallsAfterCancel = flyToCalls.length;
-      const selectedEntity = () => gev.viewer.entities.values
-        .find((entity) => String(entity.id).startsWith('radio:selected:')) || null;
+      const selectedEntity = () => window.__qaRadioSelected();
       const restoredEntity = selectedEntity();
       const previewId = restoredEntity?.id || null;
       after.previewId = previewId;
@@ -2878,7 +2890,7 @@ async function main() {
         filter: changedFilterState.filter,
         restoredStationId: changedFilterState.tuningRestoredStationId,
         selectedId: changedFilterState.selected?.id || null,
-        entityRebuilt: Boolean(changedFilterEntity && changedFilterEntity !== restoredEntity),
+        entityRebuilt: Boolean(changedFilterEntity && changedFilterEntity.dot.primitive !== restoredEntity?.dot.primitive),
         entityId: changedFilterEntity?.id || null,
         snapshotPreserved: radio.getAcceptedCatalogSnapshot() === changedFilterSnapshot,
         playDelta: window.__qaRadioPlayCalls.length - changedFilterPlays,
@@ -2902,7 +2914,7 @@ async function main() {
         restoredAfter: sameFilterState.tuningRestoredStationId,
         filter: sameFilterState.filter,
         selectedId: sameFilterState.selected?.id || null,
-        entityRebuilt: Boolean(sameFilterEntity && sameFilterEntity !== sameFilterRestoredEntity),
+        entityRebuilt: Boolean(sameFilterEntity && sameFilterEntity.dot.primitive !== sameFilterRestoredEntity?.dot.primitive),
         entityId: sameFilterEntity?.id || null,
         snapshotPreserved: radio.getAcceptedCatalogSnapshot() === sameFilterSnapshot,
         playDelta: window.__qaRadioPlayCalls.length - sameFilterPlays,
@@ -2972,7 +2984,7 @@ async function main() {
     const tunerRefreshTarget = await page.evaluate(() => {
       const gev = window.__godsEyeView;
       const slider = document.getElementById('radio-tuner-slider');
-      const stations = gev.styleManager._radioTunerStations;
+      const stations = gev.styleManager._radioControls._radioTunerStations;
       const targetIndex = 1;
       const rect = slider.getBoundingClientRect();
       const clientX = rect.left + 7 + (rect.width - 14) * targetIndex / Math.max(1, stations.length - 1);
@@ -3003,7 +3015,7 @@ async function main() {
     await page.evaluate(async () => {
       await window.__godsEyeView.dataManager.layers.get('radio').module.update();
     });
-    const tunerRefreshRelease = await page.evaluate((target) => {
+    const tunerRefreshRelease = await page.evaluate(async (target) => {
       const gev = window.__godsEyeView;
       const slider = document.getElementById('radio-tuner-slider');
       const displayedBeforeRelease = document.getElementById('radio-tuner-station').textContent;
@@ -3016,6 +3028,10 @@ async function main() {
         clientY: target.clientY,
       }));
       const state = gev.dataManager.layers.get('radio').module.getUIState();
+      // The playback line renders from the Radio store once Vue flushes.
+      const message = await Promise.resolve().then(
+        () => document.getElementById('radio-playback-state').textContent,
+      );
       return {
         displayedBeforeRelease,
         frozenGeneration,
@@ -3024,7 +3040,7 @@ async function main() {
         plays: window.__qaRadioPlayCalls.length,
         value: document.getElementById('radio-tuner-value').textContent,
         stationText: document.getElementById('radio-tuner-station').textContent,
-        message: document.getElementById('radio-playback-state').textContent,
+        message,
         targetId: target.id,
       };
     }, tunerRefreshTarget);
@@ -3055,7 +3071,7 @@ async function main() {
       const max = Number(slider.max);
       const direction = startSlot < max ? 1 : -1;
       const targetIndex = startSlot + direction;
-      const targetId = gev.styleManager._radioTunerStations[targetIndex]?.id || null;
+      const targetId = gev.styleManager._radioControls._radioTunerStations[targetIndex]?.id || null;
       const rect = slider.getBoundingClientRect();
       const xFor = (index) => rect.left + 7 + (rect.width - 14) * index / Math.max(1, max);
       const pointer = (type, index) => slider.dispatchEvent(new PointerEvent(type, {
@@ -3071,6 +3087,8 @@ async function main() {
       pointer('pointermove', targetIndex);
       const previewPlays = window.__qaRadioPlayCalls.length;
       pointer('pointerup', targetIndex);
+      // The tuner renders from the Radio store; sample once Vue has patched.
+      await Promise.resolve();
       const samples = [needle.getBoundingClientRect().left];
       await new Promise((resolve) => requestAnimationFrame(resolve));
       samples.push(needle.getBoundingClientRect().left);
@@ -3087,37 +3105,53 @@ async function main() {
         expectedSlot: targetIndex,
         previewPlayDelta: previewPlays - playsBefore,
         commitPlayDelta: window.__qaRadioPlayCalls.length - playsBefore,
+        audioState: state.audioState,
+        tuningStatic: state.tuningStatic,
         samples,
         spread: Math.max(...samples) - Math.min(...samples),
       };
     });
     check(
-      'pointer preview never plays and release commits the nearest station once without a needle sweep',
+      'from a stopped Radio, pointer release only selects the nearest station, silently and without a needle sweep',
       tunerDirectRelease.targetId
         && tunerDirectRelease.selectedId === tunerDirectRelease.targetId
         && tunerDirectRelease.sliderSlot === tunerDirectRelease.expectedSlot
         && tunerDirectRelease.previewPlayDelta === 0
-        && tunerDirectRelease.commitPlayDelta === 1
+        && tunerDirectRelease.commitPlayDelta === 0
+        && tunerDirectRelease.audioState === 'stopped'
+        && !tunerDirectRelease.tuningStatic
         && tunerDirectRelease.spread < 0.5,
       JSON.stringify(tunerDirectRelease),
     );
+    // The release plays only if a stream was active when the drag began.
+    await page.evaluate(() => window.__godsEyeView.dataManager.layers.get('radio').module.togglePlayback({ origin: 'user' }));
+    await page.waitForFunction(() => window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().audioState === 'playing');
+    // Earlier cases scroll and resize the directory. Bring the physical drag
+    // target back into its scroller before deriving viewport mouse coordinates.
+    await page.$eval('#radio-tuner-slider', (slider) => slider.scrollIntoView({ block: 'center', inline: 'nearest' }));
+    await page.waitForFunction(() => {
+      const slider = document.getElementById('radio-tuner-slider');
+      const rect = slider.getBoundingClientRect();
+      const x = rect.left + 7 + (rect.width - 14) * Number(slider.value) / Math.max(1, Number(slider.max));
+      return document.elementFromPoint(x, rect.top + rect.height / 2) === slider;
+    });
     const tunerCommitTarget = await page.evaluate(() => {
       const gev = window.__godsEyeView;
       const slider = document.getElementById('radio-tuner-slider');
       const targetIndex = 11;
       slider.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 }));
-      const station = gev.styleManager._radioTunerStations[targetIndex];
+      const station = gev.styleManager._radioControls._radioTunerStations[targetIndex];
       const rect = slider.getBoundingClientRect();
       const currentRatio = Number(slider.value) / Math.max(1, Number(slider.max));
       window.__qaRadioDelayNextPlay = true;
       return {
         id: station.id,
         targetIndex,
-        count: gev.styleManager._radioTunerStations.length,
-        frozenSignature: gev.styleManager._radioTunerBandSignature,
+        count: gev.styleManager._radioControls._radioTunerStations.length,
+        frozenSignature: gev.styleManager._radioControls._radioTunerBandSignature,
         startX: rect.left + 7 + (rect.width - 14) * currentRatio,
         targetX: rect.left + 7 + (rect.width - 14) * targetIndex
-          / Math.max(1, gev.styleManager._radioTunerStations.length - 1),
+          / Math.max(1, gev.styleManager._radioControls._radioTunerStations.length - 1),
         y: rect.top + rect.height / 2,
       };
     });
@@ -3135,11 +3169,11 @@ async function main() {
         audioState: state.audioState,
         tuningStatic: state.tuningStatic,
         awaiting: state.tuningAwaitingStationId,
-        signatureStable: gev.styleManager._radioTunerBandSignature === target.frozenSignature,
-        selectedIndex: gev.styleManager._radioTunerStations.findIndex((item) => item.id === state.selected?.id),
+        signatureStable: gev.styleManager._radioControls._radioTunerBandSignature === target.frozenSignature,
+        selectedIndex: gev.styleManager._radioControls._radioTunerStations.findIndex((item) => item.id === state.selected?.id),
         sliderSlot: Number(slider.value),
         ratio: Number(document.getElementById('radio-tuner').style.getPropertyValue('--radio-tuner-ratio')),
-        pinned: gev.styleManager._radioTunerBandPinnedForNavigation,
+        pinned: gev.styleManager._radioControls._radioTunerBandPinnedForNavigation,
       };
     }, tunerCommitTarget);
     check(
@@ -3183,7 +3217,7 @@ async function main() {
         y: rect.top + rect.height / 2,
         ratio,
         usableWidth: rect.width - 14,
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
       };
     });
     const microDragSamples = [];
@@ -3199,7 +3233,7 @@ async function main() {
           pixelDelta,
           slot: Number(slider.value),
           ratio: Number(document.getElementById('radio-tuner').style.getPropertyValue('--radio-tuner-ratio')),
-          signature: style._radioTunerBandSignature,
+          signature: style._radioControls._radioTunerBandSignature,
         };
       }, delta));
     }
@@ -3238,9 +3272,9 @@ async function main() {
       const gev = window.__godsEyeView;
       const style = gev.styleManager;
       const before = {
-        signature: style._radioTunerBandSignature,
-        ids: style._radioTunerStations.map((station) => station.id),
-        selectedIndex: style._radioTunerStations.findIndex((station) => station.id === selectedId),
+        signature: style._radioControls._radioTunerBandSignature,
+        ids: style._radioControls._radioTunerStations.map((station) => station.id),
+        selectedIndex: style._radioControls._radioTunerStations.findIndex((station) => station.id === selectedId),
         needle: Number(document.getElementById('radio-tuner').style.getPropertyValue('--radio-tuner-ratio')),
       };
       const current = gev.viewer.camera.positionCartographic;
@@ -3256,11 +3290,11 @@ async function main() {
       });
       gev.viewer.camera.changed.raiseEvent();
       await new Promise((resolve) => setTimeout(resolve, 400));
-      const stations = gev.styleManager._radioTunerStations;
+      const stations = gev.styleManager._radioControls._radioTunerStations;
       const selectedIndex = stations.findIndex((station) => station.id === selectedId);
       return {
         before,
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
         ids: stations.map((station) => station.id),
         count: stations.length,
         selectedIndex,
@@ -3279,14 +3313,14 @@ async function main() {
     const nextNeedleBefore = await page.evaluate(() => {
       const style = window.__godsEyeView.styleManager;
       const selectedId = window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().selected?.id;
-      const selectedIndex = style._radioTunerStations.findIndex((station) => station.id === selectedId);
-      const selectedPoolIndex = style._radioTunerPool.findIndex((station) => station.id === selectedId);
-      const expectedPoolIndex = (selectedPoolIndex + 1) % style._radioTunerPool.length;
+      const selectedIndex = style._radioControls._radioTunerStations.findIndex((station) => station.id === selectedId);
+      const selectedPoolIndex = style._radioControls._radioTunerPool.findIndex((station) => station.id === selectedId);
+      const expectedPoolIndex = (selectedPoolIndex + 1) % style._radioControls._radioTunerPool.length;
       return {
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
         selectedIndex,
-        count: style._radioTunerStations.length,
-        expectedId: style._radioTunerPool[expectedPoolIndex]?.id || null,
+        count: style._radioControls._radioTunerStations.length,
+        expectedId: style._radioControls._radioTunerPool[expectedPoolIndex]?.id || null,
       };
     });
     await page.$eval('#radio-next-btn', (button) => button.click());
@@ -3294,15 +3328,15 @@ async function main() {
     const nextNeedleAfter = await page.evaluate(() => {
       const style = window.__godsEyeView.styleManager;
       const selectedId = window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().selected?.id;
-      const selectedIndex = style._radioTunerStations.findIndex((station) => station.id === selectedId);
+      const selectedIndex = style._radioControls._radioTunerStations.findIndex((station) => station.id === selectedId);
       return {
-        signature: style._radioTunerBandSignature,
+        signature: style._radioControls._radioTunerBandSignature,
         selectedId,
         selectedIndex,
-        count: style._radioTunerStations.length,
+        count: style._radioControls._radioTunerStations.length,
         sliderSlot: Number(document.getElementById('radio-tuner-slider').value),
         ratio: Number(document.getElementById('radio-tuner').style.getPropertyValue('--radio-tuner-ratio')),
-        pinned: style._radioTunerBandPinnedForNavigation,
+        pinned: style._radioControls._radioTunerBandPinnedForNavigation,
       };
     });
     check(
@@ -3322,13 +3356,13 @@ async function main() {
       const slider = document.getElementById('radio-tuner-slider');
       const key = (type, value) => slider.dispatchEvent(new KeyboardEvent(type, {
         bubbles: true,
+        cancelable: true,
         key: value,
       }));
-      const markerId = () => gev.viewer.entities.values
-        .find((entity) => String(entity.id).startsWith('radio:selected:'))?.id || null;
+      const markerId = () => window.__qaRadioSelected()?.id || null;
       const startIndex = Number(slider.value);
-      const expectedIndex = Math.min(style._radioTunerStations.length - 1, startIndex + 1);
-      const expectedId = style._radioTunerStations[expectedIndex]?.id || null;
+      const expectedIndex = Math.min(style._radioControls._radioTunerStations.length - 1, startIndex + 1);
+      const expectedId = style._radioControls._radioTunerStations[expectedIndex]?.id || null;
       const playsBefore = window.__qaRadioPlayCalls.length;
       key('keydown', 'ArrowRight');
       const preview = {
@@ -3353,7 +3387,7 @@ async function main() {
         tuningActive: radio.getUIState().tuningActive,
         playDelta: window.__qaRadioPlayCalls.length - committedPlays,
       };
-      const count = style._radioTunerStations.length;
+      const count = style._radioControls._radioTunerStations.length;
       const pageStep = Math.max(1, Math.round((count - 1) / 10));
       const previewAndCancel = (value, expectedSlot) => {
         const beforePlays = window.__qaRadioPlayCalls.length;
@@ -3376,7 +3410,8 @@ async function main() {
         previewAndCancel('PageUp', Math.min(count - 1, base + pageStep)),
         previewAndCancel('PageDown', Math.max(0, base - pageStep)),
       ];
-      return { startIndex, expectedIndex, expectedId, preview, committed, cancelled, navigation };
+      return { startIndex, expectedIndex, expectedId, preview, committed, cancelled, navigation,
+        panelStayedOpen: !document.getElementById('radio-panel').classList.contains('collapsed') };
     });
     check(
       'keyboard preview is silent, key release commits once, and Escape restores the committed station',
@@ -3388,7 +3423,8 @@ async function main() {
         && !tunerKeyboard.committed.tuningActive && tunerKeyboard.committed.playDelta === 1
         && tunerKeyboard.cancelled.selectedId === tunerKeyboard.expectedId
         && tunerKeyboard.cancelled.slot === tunerKeyboard.expectedIndex
-        && !tunerKeyboard.cancelled.tuningActive && tunerKeyboard.cancelled.playDelta === 0,
+        && !tunerKeyboard.cancelled.tuningActive && tunerKeyboard.cancelled.playDelta === 0
+        && tunerKeyboard.panelStayedOpen,
       JSON.stringify(tunerKeyboard),
     );
     check(
@@ -3405,7 +3441,7 @@ async function main() {
       const radio = gev.dataManager.layers.get('radio').module;
       const slider = document.getElementById('radio-tuner-slider');
       const rect = slider.getBoundingClientRect();
-      const count = style._radioTunerStations.length;
+      const count = style._radioControls._radioTunerStations.length;
       const centerIndex = Math.floor((count - 1) / 2 + 0.5);
       const clientX = rect.left + rect.width / 2;
       slider.dispatchEvent(new PointerEvent('pointerdown', {
@@ -3423,9 +3459,8 @@ async function main() {
         centerIndex,
         slot: Number(slider.value),
         ratio: Number(document.getElementById('radio-tuner').style.getPropertyValue('--radio-tuner-ratio')),
-        markerId: gev.viewer.entities.values
-          .find((entity) => String(entity.id).startsWith('radio:selected:'))?.id || null,
-        expectedId: style._radioTunerStations[centerIndex]?.id || null,
+        markerId: window.__qaRadioSelected()?.id || null,
+        expectedId: style._radioControls._radioTunerStations[centerIndex]?.id || null,
       };
       slider.dispatchEvent(new PointerEvent('pointercancel', {
         bubbles: true,
@@ -3450,7 +3485,7 @@ async function main() {
     const fullPoolNavigation = await page.evaluate(() => {
       const gev = window.__godsEyeView;
       const radio = gev.dataManager.layers.get('radio').module;
-      const pool = gev.styleManager._radioTunerPool;
+      const pool = gev.styleManager._radioControls._radioTunerPool;
       const ids = pool.map((station) => station.id);
       const selectWithoutPlayback = (index) => radio.selectStation(ids[index], {
         autoplay: false,
@@ -3496,11 +3531,14 @@ async function main() {
       });
     });
     await sleep(500);
+    // Next left the Radio stopped; a release plays only from an active stream.
+    await page.evaluate(() => window.__godsEyeView.dataManager.layers.get('radio').module.togglePlayback({ origin: 'user' }));
+    await page.waitForFunction(() => window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().audioState === 'playing');
     const failedTuner = await page.evaluate(async () => {
       const gev = window.__godsEyeView;
       const slider = document.getElementById('radio-tuner-slider');
       const rect = slider.getBoundingClientRect();
-      const count = gev.styleManager._radioTunerStations.length;
+      const count = gev.styleManager._radioControls._radioTunerStations.length;
       const current = Number(slider.value);
       const target = Math.min(count - 1, current + 4);
       const xFor = (index) => rect.left + 7 + (rect.width - 14) * index / Math.max(1, count - 1);
@@ -3546,9 +3584,6 @@ async function main() {
     const markerTarget = await page.evaluate(async () => {
       const viewer = window.__godsEyeView.viewer;
       const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
-      const source = Array.from({ length: viewer.dataSources.length }, (_, index) => viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations');
-      source.clustering.enabled = false;
       const selectedId = radio.getUIState().selected?.id || null;
       if (selectedId) {
         radio.selectStation(selectedId, {
@@ -3575,9 +3610,6 @@ async function main() {
         });
         viewer.scene.requestRender();
       });
-      // Cesium clears its private cluster collections during the rendered
-      // disabled-state update. Publish the same-filter singleton overlay only
-      // after that frame so this harness mutation cannot leak stale clusters.
       radio.setFilter('news');
       viewer.scene.requestRender();
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -3606,14 +3638,14 @@ async function main() {
           let visibleEntityCount = 0;
           let singletonEntityCount = 0;
           let paintedSingletonCount = 0;
-          for (const entity of source.entities.values) {
-            if (!entity.show) continue;
+          for (const row of window.__qaRadioRows('stations')) {
+            if (!row.show) continue;
             visibleEntityCount += 1;
-            const id = String(entity.id).slice('radio:'.length);
+            const id = String(row.id).slice('radio:'.length);
             const overlayId = `station:${id}`;
             if (!singletonIds.has(overlayId)) continue;
             singletonEntityCount += 1;
-            const position = entity.position?.getValue(viewer.clock.currentTime);
+            const position = row.primitive.position;
             const canvas = position && viewer.scene.cartesianToCanvasCoordinates(position);
             const paintRect = getOverlayPaintRect('radio', overlayId);
             if (paintRect) paintedSingletonCount += 1;
@@ -3623,7 +3655,7 @@ async function main() {
                 id,
                 x: canvas.x,
                 y: canvas.y,
-                ownsNativeLabel: Boolean(entity.label),
+                ownsNativeLabel: row.primitive.text !== undefined,
                 labelPainted: true,
                 singletonTexts: diagnostics.singletonTexts,
               });
@@ -3692,10 +3724,15 @@ async function main() {
         orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
       });
       radio.stopPlayback();
-      Array.from({ length: gev.viewer.dataSources.length }, (_, index) => gev.viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations').clustering.enabled = true;
-      radio.selectStation('00000000-0000-4000-8000-000000000001', { autoplay: false, focus: false });
-      const pool = gev.styleManager._radioTunerPool;
+      // Next plays only while a stream is active, so start from a playing station.
+      radio.selectStation('00000000-0000-4000-8000-000000000001', { autoplay: true, focus: false });
+    });
+    await page.waitForFunction(() => window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().audioState === 'playing');
+    await page.evaluate(() => {
+      const gev = window.__godsEyeView;
+      const camera = gev.viewer.camera;
+      const radio = gev.dataManager.layers.get('radio').module;
+      const pool = gev.styleManager._radioControls._radioTunerPool;
       const selectedIndex = pool.findIndex((station) => station.id === radio.getUIState().selected?.id);
       window.__qaRadioExpectedPrimary = pool[(selectedIndex + 1) % pool.length];
       window.__qaRadioExpectedFallback = pool[(selectedIndex + 2) % pool.length];
@@ -3709,22 +3746,22 @@ async function main() {
       gev.dataManager.layers.get('flights').enabled = true;
     });
     await sleep(500);
-    await page.evaluate(() => window.__godsEyeView.styleManager.setPanelCollapsed('global-context-panel', true));
     await page.evaluate(() => {
-      const button = document.getElementById('context-radio-toggle-btn');
-      if (button.getAttribute('aria-expanded') !== 'true') button.click();
+      const manager = window.__godsEyeView.styleManager;
+      manager.setPanelCollapsed('global-context-panel', false);
+      manager.setPanelCollapsed('radio-panel', false);
     });
-    await page.waitForSelector('#context-radio-mini', { visible: true });
+    await page.waitForSelector('#radio-next-btn', { visible: true });
     await page.evaluate(() => {
       window.__qaRadioCameraHeight = window.__godsEyeView.viewer.camera.positionCartographic.height;
     });
     const radioOnlyNextDispatched = await page.evaluate(() => {
-      const button = document.getElementById('context-radio-mini-next-btn');
+      const button = document.getElementById('radio-next-btn');
       if (!button) return false;
       button.click();
       return true;
     });
-    if (!radioOnlyNextDispatched) throw new Error('Radio compact next button unavailable');
+    if (!radioOnlyNextDispatched) throw new Error('Radio next button unavailable');
     await page.waitForFunction(() => typeof window.__qaRejectRadioPlay === 'function');
     await page.evaluate(() => {
       const viewer = window.__godsEyeView.viewer;
@@ -3742,8 +3779,7 @@ async function main() {
     const playing = await page.evaluate(async () => {
       const radio = window.__godsEyeView.dataManager.layers.get('radio').module;
       const viewer = window.__godsEyeView.viewer;
-      const selectedEntity = window.__godsEyeView.viewer.entities.values
-        .find((entity) => String(entity.id).startsWith('radio:selected:'));
+      const selectedEntity = window.__qaRadioSelected();
       const { getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
       const flightTargets = window.__qaRadioFlyToCalls.map(({ destination }) => {
         const position = viewer.scene.globe.ellipsoid.cartesianToCartographic(destination);
@@ -3759,12 +3795,11 @@ async function main() {
       flyToCalls: window.__qaRadioFlyToCalls.length,
       flightTargets,
       cameraHeight: window.__qaRadioCameraHeight,
-      compactPlayLabel: document.getElementById('context-radio-mini-play-btn').getAttribute('aria-label'),
-      regularMarkerSize: Array.from({ length: window.__godsEyeView.viewer.dataSources.length }, (_, index) => window.__godsEyeView.viewer.dataSources.get(index))
-        .find((item) => item.name === 'Radio stations')?.entities.values[0]?.point?.pixelSize?.getValue(),
-      selectedMarkerSize: selectedEntity?.point?.pixelSize?.getValue(),
-      selectedBracketWidth: selectedEntity?.billboard?.width?.getValue(),
-      selectedOwnsNativeLabel: Boolean(selectedEntity?.label),
+      playLabel: document.getElementById('radio-play-btn').getAttribute('aria-label'),
+      regularMarkerSize: window.__qaRadioRows('stations')[0]?.primitive.pixelSize,
+      selectedMarkerSize: selectedEntity?.dot.primitive.pixelSize,
+      selectedBracketWidth: selectedEntity?.bracket?.primitive.width,
+      selectedOwnsNativeLabel: Boolean(window.__qaRadioRows('selected-label').length),
       overlay: radio.getOverlayDiagnostics(),
       host: getWorldOverlayDiagnostics(),
       expectedPrimary: window.__qaRadioExpectedPrimary,
@@ -3772,7 +3807,7 @@ async function main() {
     };
     });
     check(
-      'compact Next follows stable directory order and retries its next available station',
+      'Radio Next follows stable directory order and retries its next available station',
       playing.state.selected?.id === playing.expectedFallback?.id
         && playing.calls[0] === playing.expectedPrimary?.streamUrl
         && playing.calls[1] === playing.expectedFallback?.streamUrl,
@@ -3783,9 +3818,9 @@ async function main() {
         fallback: playing.expectedFallback?.id,
       }),
     );
-    check('compact next is explicit playback and updates play/pause state', playing.calls.length === 2 && playing.compactPlayLabel.startsWith('Pause'));
+    check('Radio next is explicit playback and updates play/pause state', playing.calls.length === 2 && playing.playLabel.startsWith('Pause'));
     check(
-      'compact next rotates toward its station without changing zoom, including fallback',
+      'Radio next rotates toward its station without changing zoom, including fallback',
       playing.flyToCalls === 2
         && Math.abs(playing.flightTargets[0]?.lat - playing.expectedPrimary?.lat) < 0.001
         && Math.abs(playing.flightTargets[0]?.lon - playing.expectedPrimary?.lon) < 0.001
@@ -3802,7 +3837,7 @@ async function main() {
           id: `qa:${ownerPrefix}:radio-camera-owner`,
           position: viewer.camera.positionWC.clone(),
         });
-        owner.gevTrackedId = `${ownerPrefix}:qa-radio-camera-owner`;
+        window.__godsEyeView.entityRecords.write(owner).trackedId = `${ownerPrefix}:qa-radio-camera-owner`;
         viewer.trackedEntity = owner;
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const beforeStationId = radio.getUIState().selected?.id || null;
@@ -3816,7 +3851,7 @@ async function main() {
           afterStationId: radio.getUIState().selected?.id || null,
           flyToDelta: window.__qaRadioFlyToCalls.length - beforeFlyToCalls,
           trackedIdentityPreserved: viewer.trackedEntity === owner,
-          trackedId: viewer.trackedEntity?.gevTrackedId || null,
+          trackedId: window.__godsEyeView.entityRecords.read(viewer.trackedEntity)?.trackedId || null,
         };
         viewer.trackedEntity = undefined;
         viewer.entities.remove(owner);
@@ -3824,11 +3859,11 @@ async function main() {
       };
       return [
         await run('flights', 'radio-next-btn'),
-        await run('military', 'context-radio-mini-prev-btn'),
+        await run('military', 'radio-prev-btn'),
       ];
     });
     check(
-      'full and compact Radio navigation preserve Flights/Military camera ownership',
+      'full Radio Next and Prev navigation preserve Flights/Military camera ownership',
       trackedRadioControls.every((sample) => sample.afterStationId
         && sample.afterStationId !== sample.beforeStationId
         && sample.flyToDelta === 0
@@ -3842,7 +3877,7 @@ async function main() {
       viewer.trackedEntity = undefined;
       window.__qaRadioDelayNextFailure = true;
       const beforeFlyToCalls = window.__qaRadioFlyToCalls.length;
-      document.getElementById('context-radio-mini-next-btn')?.click();
+      document.getElementById('radio-next-btn')?.click();
       return { beforeFlyToCalls };
     });
     await page.waitForFunction(() => typeof window.__qaRejectRadioPlay === 'function');
@@ -3852,11 +3887,11 @@ async function main() {
         id: 'qa:flights:delayed-radio-fallback-owner',
         position: viewer.camera.positionWC.clone(),
       });
-      owner.gevTrackedId = 'flights:qa-delayed-radio-fallback-owner';
+      window.__godsEyeView.entityRecords.write(owner).trackedId = 'flights:qa-delayed-radio-fallback-owner';
       viewer.trackedEntity = owner;
       window.__qaDelayedRadioTrackingOwner = owner;
       window.__qaRejectRadioPlay();
-      return owner.gevTrackedId;
+      return window.__godsEyeView.entityRecords.read(owner)?.trackedId;
     });
     await page.waitForFunction(() => window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().audioState === 'playing');
     const delayedFallbackOwnership = await page.evaluate((beforeFlyToCalls) => {
@@ -3865,7 +3900,7 @@ async function main() {
       const result = {
         flyToDelta: window.__qaRadioFlyToCalls.length - beforeFlyToCalls,
         trackedIdentityPreserved: viewer.trackedEntity === owner,
-        trackedId: viewer.trackedEntity?.gevTrackedId || null,
+        trackedId: window.__godsEyeView.entityRecords.read(viewer.trackedEntity)?.trackedId || null,
         selectedId: window.__godsEyeView.dataManager.layers.get('radio').module.getUIState().selected?.id || null,
       };
       viewer.trackedEntity = undefined;
@@ -3925,12 +3960,22 @@ async function main() {
         destination,
         orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
       });
-      const selectedEntity = viewer.entities.values
-        .find((entity) => String(entity.id) === `radio:selected:${selected.id}`);
+      // The selected station's drawn dot and bracket, read afresh: Radio's
+      // horizon pass shows them on its own timer.
+      const selectedEntity = () => {
+        const drawn = window.__qaRadioSelected();
+        return drawn?.id === `radio:selected:${selected.id}` ? drawn : null;
+      };
       const { getOverlayPaintRect, getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
       const expectedEntryId = `selected:${selected.id}`;
       let painted = null;
-      for (let attempt = 0; attempt < 20 && !painted?.rect; attempt += 1) {
+      // Radio's horizon pass reveals the selected entity on its own timer
+      // after the camera jump, so a stationary view waits for both to settle.
+      for (
+        let attempt = 0;
+        attempt < 20 && !(painted?.rect && selectedEntity()?.show === true);
+        attempt += 1
+      ) {
         painted = await new Promise((resolve) => {
           let removePostRender = null;
           const timeout = setTimeout(() => {
@@ -3953,7 +3998,7 @@ async function main() {
         expectedEntryId,
         rect: painted?.rect || null,
         host: painted?.host || getWorldOverlayDiagnostics(),
-        selectedEntityShow: selectedEntity?.show,
+        selectedEntityShow: selectedEntity()?.show,
         cameraHeight: viewer.camera.positionCartographic.height,
       };
     });
@@ -3978,8 +4023,12 @@ async function main() {
         }),
         orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
       });
-      const selectedEntity = viewer.entities.values
-        .find((entity) => String(entity.id) === `radio:selected:${selected.id}`);
+      // The selected station's drawn dot and bracket, read afresh: Radio's
+      // horizon pass shows them on its own timer.
+      const selectedEntity = () => {
+        const drawn = window.__qaRadioSelected();
+        return drawn?.id === `radio:selected:${selected.id}` ? drawn : null;
+      };
       const { getOverlayPaintRect, getWorldOverlayDiagnostics } = await import('/src/overlays/worldOverlay.js');
       const expectedEntryId = `selected:${selected.id}`;
       let rect = null;
@@ -4004,7 +4053,8 @@ async function main() {
           viewer.scene.requestRender();
         });
       }
-      const entityPosition = selectedEntity?.position?.getValue?.();
+      const selectedDrawn = selectedEntity();
+      const entityPosition = selectedDrawn?.position;
       const entityAnchor = entityPosition
         && viewer.scene.cartesianToCanvasCoordinates(entityPosition);
       let selectedNativePick = null;
@@ -4014,13 +4064,16 @@ async function main() {
       // billboard satisfy the loop while the point anchor was still missing.
       for (let attempt = 0; entityAnchor && attempt < 8 && !selectedPointPick; attempt += 1) {
         const picks = viewer.scene.drillPick(entityAnchor, 16) || [];
-        selectedNativePick = picks.find((picked) => picked?.id === selectedEntity);
+        selectedNativePick = picks.find((picked) => (
+          picked?.primitive === selectedDrawn.dot.primitive
+          || picked?.primitive === selectedDrawn.bracket?.primitive
+        ));
         selectedPointPick = picks.find((picked) => (
-          picked?.id === selectedEntity
+          picked?.primitive === selectedDrawn.dot.primitive
           && String(picked?.primitive?.constructor?.name || '').includes('PointPrimitive')
         ));
         selectedBillboardPick = picks.find((picked) => (
-          picked?.id === selectedEntity
+          picked?.primitive === selectedDrawn.bracket?.primitive
           && String(picked?.primitive?.constructor?.name || '').includes('Billboard')
         ));
         if (!selectedPointPick) {
@@ -4033,18 +4086,15 @@ async function main() {
           });
         }
       }
-      const selectedPointDistance = selectedEntity?.point?.distanceDisplayCondition?.getValue?.();
+      const selectedPointDistance = selectedDrawn?.dot.primitive.distanceDisplayCondition;
       return {
         rect,
         selectedNativePickable: Boolean(selectedNativePick),
         selectedPointPickable: Boolean(selectedPointPick),
         selectedBillboardPickable: Boolean(selectedBillboardPick),
         selectedPointMaxDistance: selectedPointDistance?.far ?? null,
-        selectedEntityShow: selectedEntity?.show,
-        selectedBracketVisible: Boolean(
-          selectedEntity?.billboard
-          && selectedEntity.billboard.show?.getValue?.() !== false
-        ),
+        selectedEntityShow: selectedDrawn?.show,
+        selectedBracketVisible: Boolean(selectedDrawn?.bracket?.show),
         entityAnchor: entityAnchor ? { x: entityAnchor.x, y: entityAnchor.y } : null,
         entityDistance: entityPosition
           ? Math.hypot(
@@ -4112,7 +4162,7 @@ async function main() {
       window.__godsEyeView.dataManager.layers.get('flights').enabled = false;
     });
     const radioOnlyNextClicked = await page.evaluate(() => {
-      const button = document.getElementById('context-radio-mini-next-btn');
+      const button = document.getElementById('radio-next-btn');
       if (!(button instanceof HTMLButtonElement)) return false;
       button.click();
       return true;
@@ -4201,7 +4251,7 @@ async function main() {
         id: 'qa:flights:radio-recenter-stage-owner',
         position: viewer.camera.positionWC.clone(),
       });
-      owner.gevTrackedId = 'flights:qa-radio-recenter-stage-owner';
+      window.__godsEyeView.entityRecords.write(owner).trackedId = 'flights:qa-radio-recenter-stage-owner';
       viewer.trackedEntity = owner;
       completeFlight(0);
       const trackingBetweenStagesCalls = calls.length;
@@ -4376,103 +4426,12 @@ async function main() {
         && companion.radioCollapsed && !companion.contextCollapsed && companion.nested,
     );
 
-    const expandedContextRadioBefore = await page.evaluate(() => {
-      const gev = window.__godsEyeView;
-      const scroller = document.querySelector('#global-context-panel .global-context-panel-inner');
-      scroller.scrollTop = 0;
-      const camera = gev.viewer.camera.positionWC;
-      return {
-        scrollTop: scroller.scrollTop,
-        pageY: window.scrollY,
-        camera: { x: camera.x, y: camera.y, z: camera.z },
-        plays: window.__qaRadioPlayCalls.length,
-      };
-    });
-    await page.click('#context-radio-toggle-btn');
-    await page.waitForFunction(() => !document.getElementById('radio-panel').classList.contains('collapsed'));
-    await sleep(450);
-    const expandedContextRadioAfter = await page.evaluate(() => {
-      const gev = window.__godsEyeView;
-      gev.styleManager._renderRadioState(gev.dataManager.layers.get('radio').module.getUIState());
-      const launcher = document.getElementById('context-radio-toggle-btn');
-      const radio = document.getElementById('radio-panel');
-      const scroller = document.querySelector('#global-context-panel .global-context-panel-inner');
-      const camera = gev.viewer.camera.positionWC;
-      return {
-        ariaControls: launcher.getAttribute('aria-controls'),
-        expanded: launcher.getAttribute('aria-expanded'),
-        label: launcher.getAttribute('aria-label'),
-        radioCollapsed: radio.classList.contains('collapsed'),
-        compactHidden: document.getElementById('context-radio-mini').hidden,
-        scrollTop: scroller.scrollTop,
-        focusTarget: document.activeElement?.getAttribute('data-collapse-target'),
-        pageY: window.scrollY,
-        camera: { x: camera.x, y: camera.y, z: camera.z },
-        plays: window.__qaRadioPlayCalls.length,
-        state: gev.dataManager.layers.get('radio').module.getUIState().audioState,
-      };
-    });
-    const expandedContextRadioCameraDelta = Math.hypot(
-      expandedContextRadioAfter.camera.x - expandedContextRadioBefore.camera.x,
-      expandedContextRadioAfter.camera.y - expandedContextRadioBefore.camera.y,
-      expandedContextRadioAfter.camera.z - expandedContextRadioBefore.camera.z,
-    );
-    check(
-      'expanded Context Radio icon reveals and scrolls to embedded Radio without an overlay or playback/camera theft',
-      expandedContextRadioAfter.ariaControls === 'radio-panel'
-        && expandedContextRadioAfter.expanded === 'true'
-        && expandedContextRadioAfter.label === 'Go to expanded Radio section'
-        && !expandedContextRadioAfter.radioCollapsed
-        && expandedContextRadioAfter.compactHidden
-        && expandedContextRadioAfter.scrollTop > expandedContextRadioBefore.scrollTop
-        && expandedContextRadioAfter.focusTarget === 'radio-panel'
-        && expandedContextRadioAfter.pageY === expandedContextRadioBefore.pageY
-        && expandedContextRadioCameraDelta < 0.01
-        && expandedContextRadioAfter.plays === expandedContextRadioBefore.plays
-        && expandedContextRadioAfter.state === 'playing',
-      JSON.stringify({
-        before: expandedContextRadioBefore,
-        after: expandedContextRadioAfter,
-        cameraDelta: expandedContextRadioCameraDelta,
-      }),
-    );
-
     await page.evaluate(() => {
       const manager = window.__godsEyeView.styleManager;
-      manager.setPanelCollapsed('global-context-panel', true);
-      manager._setRadioDisclosure(true);
+      manager.setPanelCollapsed('global-context-panel', false);
+      manager.setPanelCollapsed('radio-panel', false);
     });
-    await page.waitForFunction(() => {
-      const close = document.getElementById('context-radio-mini-close-btn');
-      const rect = close.getBoundingClientRect();
-      return !document.getElementById('context-radio-mini').hidden && rect.width > 0 && rect.height > 0;
-    });
-    await page.click('#context-radio-mini-close-btn');
-    const closedCompact = await page.evaluate(() => {
-      const launcher = document.getElementById('context-radio-toggle-btn');
-      return {
-        radioCollapsed: document.getElementById('radio-panel').classList.contains('collapsed'),
-        compactHidden: document.getElementById('context-radio-mini').hidden,
-        focusRestored: document.activeElement === launcher,
-      };
-    });
-    await page.click('#context-radio-toggle-btn');
-    await page.waitForFunction(() => !document.getElementById('context-radio-mini').hidden);
-    await page.click('#context-radio-details-btn');
-    const repeatedOpen = await page.evaluate(() => ({
-      radioCollapsed: document.getElementById('radio-panel').classList.contains('collapsed'),
-      compactHidden: document.getElementById('context-radio-mini').hidden,
-    }));
-    const splitDetailActions = { closedCompact, repeatedOpen };
-    check(
-      'collapsed Context keeps compact close and full-panel open as separate stable actions',
-      !splitDetailActions.closedCompact.radioCollapsed
-        && splitDetailActions.closedCompact.compactHidden
-        && splitDetailActions.closedCompact.focusRestored
-        && !splitDetailActions.repeatedOpen.radioCollapsed
-        && splitDetailActions.repeatedOpen.compactHidden,
-      JSON.stringify(splitDetailActions),
-    );
+    await page.waitForFunction(() => !document.getElementById('radio-panel').classList.contains('collapsed'));
 
     await page.click('#global-context-flights-btn');
     await page.waitForFunction(() => !document.getElementById('context-flights-view').hidden);

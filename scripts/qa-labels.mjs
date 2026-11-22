@@ -56,7 +56,7 @@ const CHROME_EXECUTABLE_CANDIDATES = [
   // tile-gated drain budget under SwiftShader on 2026-07-30 — six
   // false-negative qa-cctv-v2 runs against a healthy build). A deterministic
   // pinned browser beats the newest one for regression harnesses.
-  (() => { try { return puppeteer.executablePath(); } catch { return null; } })(),
+  await puppeteer.executablePath().catch(() => null),
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
@@ -84,14 +84,6 @@ function percentile(values, pct) {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (sorted.length === 0) return Number.NaN;
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * pct) - 1)];
-}
-
-function parseJson(value, fallback) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
 }
 
 function analyzeMembership(samples) {
@@ -274,12 +266,6 @@ async function main() {
       () => window.__godsEyeView?.viewer && window.__godsEyeView?.styleManager,
       { timeout: 60000, polling: 100 },
     );
-
-    // flyToAustin schedules its 600 m arrival 500 ms after initialization.
-    // Let that callback start, then cancel it before establishing the global
-    // measurement camera so startup motion cannot invalidate the sample.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    await page.evaluate(() => window.__godsEyeView.viewer.camera.cancelFlight());
 
     const stateChecks = await page.evaluate((storageKey) => {
       const manager = window.__godsEyeView.styleManager;
