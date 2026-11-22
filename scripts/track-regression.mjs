@@ -17,9 +17,9 @@
  * `fetch` shim in the page that intercepts the poll endpoints and returns
  * SYNTHETIC aircraft positioned near the camera, in the EXACT upstream payload
  * shapes the layers parse:
- *   - flights  → GET /api/opensky      → { states: [ <state-vector[]> ] }
- *   - military → GET /api/adsblol/mil  → { ac: [ <adsblol-aircraft{}> ] }
- *   - vessels  → GET /api/ais-live     → connected, zero-row snapshot
+ *   - flights  → GET /api/flights      → { states: [ <state-vector[]> ] }
+ *   - military → GET /api/military  → { ac: [ <adsblol-aircraft{}> ] }
+ *   - vessels  → GET /api/vessels     → connected, zero-row snapshot
  * The shim stays installed so the layers' setInterval pollers keep the
  * synthetic planes alive (under MISSING_POLL_LIMIT=3 so they're never pruned).
  *
@@ -33,7 +33,8 @@
  *                           moves the camera — it stays in the follow band).
  *   3. NO CROSS-LAYER     — tracking military then commercial (and vice versa)
  *      ORPHAN               clears the FIRST layer (its getTrackedInfo()===null),
- *                           via the per-layer viewer.trackedEntityChanged listener.
+ *                           via each layer's follow-changed listener (the follow
+ *                           service, data/followed.js: onFollowChanged).
  *   4. INIT CLEAN         — app loads, all 12 layers present, no console errors,
  *                           [Detection] Initialized + [TrackedReadout] Initialized.
  *
@@ -42,9 +43,10 @@
  *                           and a real mouse click on the tracked plane is a
  *                           NO-OP (no deselect, no camera spike).
  *   M3. AGE-OUT RELEASE   — when the tracked plane's fixes stop arriving
- *                           (3 missed polls via the shim), tracking clears and
- *                           the camera is RELEASED IN PLACE: viewer.trackedEntity
- *                           undefined, NO jump (product rule 2026-07-02 —
+ *                           it stays tracked (STALE, then SIGNAL LOST) until
+ *                           10 min after its newest fix; then tracking clears
+ *                           and the camera is RELEASED IN PLACE: the camera
+ *                           follows nothing (data/followed.js), NO jump (owner decision 2026-07-02 —
  *                           the old ~80 km overview flyTo is gone).
  *
  * And the landing-ghost polish (2026-07-02): a LOW+SLOW (landed) plane that
@@ -53,7 +55,7 @@
  * readout carries a "· STALE" cue while a tracked plane coasts through its
  * missed-poll grace, and drops it when the plane reappears.
  *
- * And the ground-traffic feature (2026-07-03, product change): present-but-
+ * And the ground-traffic feature (2026-07-03, owner reversal): present-but-
  * grounded planes render FULL-STRENGTH in the airborne tint pipeline
  * (white / amber-military; the day-1 gray mute was killed the same day) at
  * ×0.8 scale and stay detectable; the on_ground flip restyles the SAME
@@ -63,7 +65,7 @@
  * Ground billboards render depth-test-free (disableDepthTestDistance = ∞) so
  * the photoreal tile skin can't bury them up close; takeoff restores the test.
  *
- * And GROUND 3D (2026-07-03, product rule LOCKED: "when I have 3D mode —
+ * And GROUND 3D (2026-07-03, owner decision LOCKED: "when I have 3D mode —
  * proximity or all — I want that respected regardless of whether a plane is
  * on the ground or in the air. No distinction."): a synthetic on_ground plane
  * is model-ELIGIBLE and gets a model under the existing cap (both layers); its
@@ -73,11 +75,16 @@
  * the TRACKED grounded plane gets the standalone tracked model too (the
  * owner's "tracked SWA143 at 0 kts showed a 2D billboard" case).
  *
- * And arrival-rotation freshness (2026-07-03 ground-polish): camera.moveEnd
- * forces a full rotation pass on the next frame (fly-to settles the
- * pose-signature gate can eat), and a billboard flipping INTO view while the
- * camera idles re-aims the same tick instead of wearing a stale nose for up
- * to ROTATION_REFRESH_MS. Both layers.
+ * And arrival-rotation freshness (2026-07-03 ground-polish): the nose is right
+ * on the first settled frame after a camera move and on the first frame a
+ * hidden contact is shown again. Both layers. (The CPU rotation passes that
+ * once guaranteed it are gone: the icon sets turn every icon along its drawn
+ * course on the GPU each frame, so the group reads the drawn rows.)
+ *
+ * The probes read what the app draws through its own seams: what the camera
+ * follows through the follow service (data/followed.js), icons from the draw
+ * port's icon sets as the renderer holds them, models by their `{set, id}`
+ * pick ids.
  *
  * Run:  npm run test:track       (assumes dev server already up on :4173)
  *       node scripts/track-regression.mjs
@@ -85,15 +92,25 @@
  * Exits non-zero if ANY invariant fails. DOES NOT COMMIT anything.
  *
  * Flags:
+ *   --source-base <path>  Browser module prefix (default /src)
  *   --url <url>        App URL (default http://localhost:4173)
  *   --headful          Show the browser (debugging)
+ *   --offline-imagery  Use bundled texture for known Esri/OSM tile images only
  *   --keep-open        Leave the browser open after the run (debugging)
  */
 
 import fs from 'node:fs';
 import puppeteer from 'puppeteer';
-import { classifyAircraft, CLASS_SCALE_3D, CLASS_MODEL_REAL } from '../src/data/aircraftClass.js';
+import { respondToPlanespotters } from './qa-photo-stub.mjs';
+import { arrivalAngleViolated, arrivalRotationPassed } from '../src/tooling/trackArrivalObservation.mjs';
+import { aircraftModelSpec } from '../src/data/fleetModels.js';
 import { ensureGeoidReady, geoidHeight } from '../src/data/geoid.js';
+
+/** The fleet model set the aircraft layers draw from, read from disk. */
+const FLEET_SET = Object.freeze({
+  catalog: JSON.parse(fs.readFileSync(new URL('../public/models/fleet/catalog.json', import.meta.url), 'utf8')),
+  types: JSON.parse(fs.readFileSync(new URL('../public/models/fleet/types.json', import.meta.url), 'utf8')),
+});
 
 // ---------------------------------------------------------------------------
 // Args
@@ -105,9 +122,11 @@ const getOpt = (name, dflt) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : dflt;
 };
 
+const SOURCE_BASE = getOpt('--source-base', '/src').replace(/\/$/, '');
 const APP_URL = getOpt('--url', 'http://localhost:4173');
 const APP_ORIGIN = new URL(APP_URL).origin;
 const HEADFUL = getFlag('--headful');
+const OFFLINE_IMAGERY = getFlag('--offline-imagery');
 const KEEP_OPEN = getFlag('--keep-open');
 
 const CHROME_EXECUTABLE_CANDIDATES = [
@@ -118,7 +137,7 @@ const CHROME_EXECUTABLE_CANDIDATES = [
   // tile-gated drain budget under SwiftShader on 2026-07-30 — six
   // false-negative qa-cctv-v2 runs against a healthy build). A deterministic
   // pinned browser beats the newest one for regression harnesses.
-  (() => { try { return puppeteer.executablePath(); } catch { return null; } })(),
+  await puppeteer.executablePath().catch(() => null),
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
@@ -199,6 +218,15 @@ async function main() {
   console.log(`  App URL : ${APP_URL}`);
   console.log(`  Mode    : ${HEADFUL ? 'headful' : 'headless'}\n`);
 
+  // Tracking does not assert imagery geography. This optional fixture leaves
+  // provider metadata, terrain, models and every tracking assertion untouched.
+  // Read before launching so a missing bundled asset fails explicitly.
+  const offlineImageryTile = OFFLINE_IMAGERY
+    ? fs.readFileSync(new URL('../node_modules/cesium/Build/Cesium/Assets/Textures/NaturalEarthII/0/0/0.jpg', import.meta.url))
+    : null;
+  let offlineImageryRequests = 0;
+  if (OFFLINE_IMAGERY) console.log('  Imagery : bundled NaturalEarthII fixture (tile images only)');
+
   // Verify the dev server is up before launching a browser.
   try {
     const res = await fetch(APP_URL, { method: 'GET' });
@@ -249,10 +277,124 @@ async function main() {
 
   try {
     const page = await browser.newPage();
+  await page.evaluateOnNewDocument((base) => { window.__gevQaSourceBase = base; }, SOURCE_BASE);
+    // What the camera follows, read through the app's follow service
+    // (data/followed.js) rather than Cesium's `trackedEntity`: the follow
+    // camera runs through the renderer's camera port, whose Cesium adapter
+    // tracks a hidden helper entity, and the tracked aircraft is no longer an
+    // entity at all. `__qaFollowed()` is null until the app is up (and the
+    // module loaded), so every wait that reads it simply keeps polling.
+    await page.evaluateOnNewDocument(() => {
+      window.__qaFollowed = () => {
+        // A probe that cannot read the follow service must not read as
+        // "follows nothing".
+        if (window.__qaFollowedError) throw new Error(`followed.js: ${window.__qaFollowedError}`);
+        return window.__qaFollowedOf?.(window.__godsEyeView?.viewer) ?? null;
+      };
+      const timer = setInterval(() => {
+        if (!window.__godsEyeView?.viewer) return;
+        clearInterval(timer);
+        import(`${window.__gevQaSourceBase || '/src'}/data/followed.js`)
+          .then((module) => { window.__qaFollowedOf = module.followedOf; })
+          .catch((error) => { window.__qaFollowedError = String(error?.message || error); });
+      }, 100);
+      // A contact's id from a drawn model's pick id: the draw port's models
+      // carry `{set, id}`; older builds stamped the bare id.
+      window.__qaModelIcao = (model) => {
+        const id = model?.id;
+        if (id && typeof id === 'object') return id.id == null ? null : String(id.id);
+        return id == null ? null : String(id);
+      };
+      // A contact's FLEET icon as the renderer draws it, shaped like the
+      // billboard the probes below were written against: `show`, `scale`,
+      // `color` (the row's colour with its alpha column applied; focus and
+      // limb recession, which the shader also folds in, are not),
+      // `disableDepthTestDistance` and `position` (where the last frame drew
+      // it). The draw port's icon sets draw on the GPU (one IconSetPrimitive
+      // per set, rows keyed by item id; before the draw port, one a layer
+      // drew itself); a set off the GPU draws Cesium
+      // billboards whose pick id is `{set, id}`. The tracked icon's own set
+      // (`<layer>-tracked-icon:<n>`) is left out: the fleet icon is what these
+      // probes always read.
+      window.__qaFindIcon = (wanted) => {
+        const scene = window.__godsEyeView?.viewer?.scene;
+        if (!scene) return null;
+        const trackedSet = (setId) => typeof setId === 'string' && setId.includes('-tracked-icon:');
+        let found = null;
+        const walk = (coll) => {
+          const n = coll.length;
+          for (let i = 0; i < n; i++) {
+            let p;
+            try { p = coll.get(i); } catch { continue; }
+            if (!p) continue;
+            if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
+            if (p.set && typeof p.set.row === 'function' && typeof p.set.has === 'function') {
+              if (!p.set.has(wanted)) continue;
+              // A primitive a layer drew itself (before the draw port) names
+              // no set.
+              const setId = typeof p._pickObject === 'function'
+                ? p._pickObject(wanted, p.set, p)?.id?.set ?? null
+                : null;
+              if (trackedSet(setId)) continue;
+              const set = p.set;
+              const row = set.row(wanted);
+              const color = set.color(row);
+              color.alpha *= set.alpha(row);
+              // (A set without the column draws over depth by default.)
+              const depth = typeof set.depthTestDistance === 'function'
+                ? set.depthTestDistance(row)
+                : Number.POSITIVE_INFINITY;
+              found = {
+                id: wanted,
+                setId,
+                show: set.shown(row),
+                scale: set.scale(row),
+                color,
+                disableDepthTestDistance: depth >= 1e30 ? Number.POSITIVE_INFINITY : depth,
+                position: set.position(row, p._tau),
+                // Degrees clockwise from north: the course the last frame
+                // turned the icon along (its rotation is derived from it on
+                // the GPU each frame).
+                course: set.course(row, p._tau),
+                // Whether the row turns along that course at all (ICON_ROTATES
+                // in data/iconSet.js); one that does not is drawn upright.
+                rotates: (set.flags(row) & 2) !== 0,
+              };
+            } else if (p.image !== undefined && p.alignedAxis !== undefined) {
+              const id = p.id && typeof p.id === 'object' ? p.id : { id: p.id };
+              if (id.id === wanted && !trackedSet(id.set)) found = p;
+            }
+          }
+        };
+        walk(scene.primitives);
+        return found;
+      };
+    });
     await page.setViewport({ width: 1280, height: 800 });
     await page.setRequestInterception(true);
     page.on('request', (request) => {
       const url = new URL(request.url());
+      // Reuse the one existing interceptor; do not install competing handlers.
+      // Exact HTTPS origins and image paths only: metadata, feature queries,
+      // other providers, terrain and local/model resources continue normally.
+      const knownImageryTile = request.method() === 'GET' && (
+        (url.origin === 'https://services.arcgisonline.com'
+          && /^\/ArcGIS\/rest\/services\/World_Imagery\/MapServer\/tile\/\d+\/\d+\/\d+$/.test(url.pathname))
+        || (url.origin === 'https://tile.openstreetmap.org'
+          && /^\/\d+\/\d+\/\d+\.png$/.test(url.pathname))
+      );
+      if (OFFLINE_IMAGERY && knownImageryTile) {
+        offlineImageryRequests++;
+        request.respond({
+          status: 200,
+          contentType: 'image/jpeg',
+          headers: { 'Access-Control-Allow-Origin': '*' },
+          body: offlineImageryTile,
+        });
+        return;
+      }
+      // Aircraft photo lookups never reach the third party: no photos.
+      if (respondToPlanespotters(request)) return;
       if (url.origin === APP_ORIGIN && url.pathname === '/api/openai/hud-summary') {
         request.respond({
           status: 200,
@@ -310,7 +452,7 @@ async function main() {
         const url = new URL(requestUrl, window.location.href);
         const isAppRequest = url.origin === appOrigin;
         // OpenSky (commercial flights): { states: [ state-vector[] ] }
-        if (isAppRequest && url.pathname === '/api/opensky') {
+        if (isAppRequest && url.pathname === '/api/flights') {
           window.__SYNTH_HITS.opensky++;
           // A withheld contact models the ordinary case where the recipient's
           // first authoritative refresh does not yet carry the shared aircraft.
@@ -325,7 +467,12 @@ async function main() {
             'Synthetica',      // 2 origin_country
             Math.floor(Date.now() / 1000), // 3 time_position
             Math.floor(Date.now() / 1000), // 4 last_contact
-            f.lon,             // 5 longitude
+            // A plane given `moveFromMs` flies east at its reported speed
+            // (the trail-head check needs a moving icon); others hold still.
+            Number.isFinite(f.moveFromMs)
+              ? f.lon + (f.vel * (Date.now() - f.moveFromMs)) / 1000
+                / (111320 * Math.cos((f.lat * Math.PI) / 180))
+              : f.lon,         // 5 longitude
             f.lat,             // 6 latitude
             f.alt,             // 7 baro_altitude (m)
             f.onGround === true, // 8 on_ground (ground-traffic phase flips this live)
@@ -338,11 +485,11 @@ async function main() {
         // Trail backfill (fires on trackById). Stub with valid-but-empty
         // payloads so the deterministic run never 404s against the dev proxy.
         // flights: { path: [ [time, lat, lon, baroAlt, true_track, on_ground] ] }
-        if (isAppRequest && url.pathname === '/api/opensky-track') {
+        if (isAppRequest && url.pathname === '/api/flights/track') {
           return Promise.resolve(jsonResponse({ path: [] }));
         }
         // military: { timestamp: <epochSec>, trace: [ [secAfter, lat, lon, ...] ] }
-        if (isAppRequest && url.pathname === '/api/adsblol/trace') {
+        if (isAppRequest && url.pathname === '/api/military/track') {
           return Promise.resolve(jsonResponse({ timestamp: Math.floor(Date.now() / 1000), trace: [] }));
         }
         // adsbdb enrichment (fires for tracked/model-eligible planes): empty
@@ -355,12 +502,34 @@ async function main() {
         // Contacts enables the optional AIS source alongside aircraft. Keep
         // this tracking harness independent of local AIS credentials while
         // preserving the truthful "awaiting first message" lifecycle.
-        if (isAppRequest && url.pathname === '/api/ais-live') {
+        if (isAppRequest && url.pathname === '/api/vessels') {
           return Promise.resolve(jsonResponse({
             status: 'connected',
             rows: [],
             lastMessageAt: null,
           }));
+        }
+        // Contacts also enables mapped installations. This tracking harness
+        // does not test installation acquisition; a valid empty viewport keeps
+        // public Overpass outages out of aircraft/satellite tracking results.
+        // Preserve the real response shape and all console-error assertions.
+        if (isAppRequest && url.pathname === '/api/military-installations') {
+          return Promise.resolve(jsonResponse({
+            elements: [],
+            saturated: false,
+            elementCap: 700,
+            retrievedAt: new Date().toISOString(),
+            status: 'ready',
+          }));
+        }
+        // CelesTrak SATCAT, which the satellite classes read beside the TLEs.
+        // An empty CSV (header only) keeps the run hermetic: the classes fall
+        // back to names and groups, as they do when SATCAT is unavailable.
+        if (isAppRequest && url.pathname.startsWith('/api/celestrak-satcat/')) {
+          return Promise.resolve(new Response(
+            'OBJECT_NAME,OBJECT_ID,NORAD_CAT_ID,OBJECT_TYPE,OPS_STATUS_CODE,LAUNCH_DATE\n',
+            { status: 200, headers: { 'Content-Type': 'text/csv' } },
+          ));
         }
         // CelesTrak TLE groups. Served from a fixed two-satellite catalog so
         // the satellite assertions are deterministic and the run never depends
@@ -397,14 +566,17 @@ async function main() {
         // for nearby names. Answer both with empty results: the entity-context
         // assertions are about the SELECTED contact, and a live lookup would
         // make the run non-hermetic (and bill the owner's Google quota).
-        if (url.hostname === 'maps.googleapis.com' && url.pathname.startsWith('/maps/api/geocode')) {
+        if (
+          isAppRequest &&
+          (url.pathname === '/api/google/reverse-geocode' || url.pathname === '/api/google/geocode')
+        ) {
           return Promise.resolve(jsonResponse({ status: 'ZERO_RESULTS', results: [] }));
         }
         if (isAppRequest && url.pathname === '/api/google/nearby-places') {
           return Promise.resolve(jsonResponse({ places: [] }));
         }
         // adsb.lol military: { ac: [ aircraft{} ] }  (must come AFTER /trace check)
-        if (isAppRequest && url.pathname === '/api/adsblol/mil') {
+        if (isAppRequest && url.pathname === '/api/military') {
           window.__SYNTH_HITS.mil++;
           const ac = window.__SYNTH.military.map((m) => ({
             hex: m.hex,
@@ -479,13 +651,13 @@ async function main() {
 
     // Independent GLB capability control. Product model absence cannot prove
     // that the browser backend is incapable: that is the condition this
-    // harness is meant to catch. Load the already-approved airplane asset
+    // harness is meant to catch. Load one of the shipped fleet models
     // directly through Cesium, outside the Flights/Military model pipelines,
     // then remove the control before exercising product behavior.
     const glbControlStarted = await evalPage(async () => {
       window.__qaGlbControl = null;
       window.__qaGlbControlError = null;
-      const asset = await fetch('/models/airplane.glb');
+      const asset = await fetch('/models/fleet/aircraft/a320.glb');
       const assetBytes = asset.ok ? (await asset.arrayBuffer()).byteLength : 0;
       if (!asset.ok || assetBytes === 0) {
         throw new Error(`GLB control asset unavailable: HTTP ${asset.status}`);
@@ -496,7 +668,7 @@ async function main() {
         Cesium.Cartesian3.fromDegrees(-97.7431, 30.2672, 9000),
       );
       void Cesium.Model.fromGltfAsync({
-        url: '/models/airplane.glb',
+        url: '/models/fleet/aircraft/a320.glb',
         modelMatrix,
         scale: 1,
       }).then((model) => {
@@ -562,6 +734,7 @@ async function main() {
       if (models3dButton) {
         if (!models3dButton.classList.contains('active')) models3dButton.click();
         models3dButton.click(); // → OFF: both layers must follow the one control
+        await new Promise((resolve) => setTimeout(resolve)); // the view renders
         models3dOff.button = models3dButton.classList.contains('active');
         models3dOff.fl = fl.getParams().models3d;
         models3dOff.mil = mil.getParams().models3d;
@@ -650,7 +823,7 @@ async function main() {
         const tracked = manager?.layers?.get('flights')?.module?.getTrackedInfo?.();
         return manager?.isEnabled?.('flights')
           && tracked?.icao24 === 'aaa001'
-          && window.__godsEyeView.viewer.trackedEntity?.gevTrackedId === 'flights:aaa001';
+          && window.__qaFollowed()?.key === 'flights:aaa001';
       },
       { timeout: 30000, polling: 100 },
     );
@@ -661,7 +834,7 @@ async function main() {
         flightsEnabled: manager.isEnabled('flights'),
         trackedId: flights.getTrackedInfo()?.icao24 || null,
         durableId: flights.getParams()?.selectedFlightsTrackingId || null,
-        viewerTrackedId: window.__godsEyeView.viewer.trackedEntity?.gevTrackedId || null,
+        viewerTrackedId: window.__qaFollowed()?.key || null,
       };
     });
     record(
@@ -691,7 +864,7 @@ async function main() {
         const tracked = manager?.layers?.get('flights')?.module?.getTrackedInfo?.();
         return manager?.isEnabled?.('flights')
           && tracked?.icao24 === 'aaa001'
-          && window.__godsEyeView.viewer.trackedEntity?.gevTrackedId === 'flights:aaa001';
+          && window.__qaFollowed()?.key === 'flights:aaa001';
       },
       { timeout: 30000, polling: 100 },
     );
@@ -702,7 +875,7 @@ async function main() {
         flightsEnabled: manager.isEnabled('flights'),
         trackedId: flights.getTrackedInfo()?.icao24 || null,
         durableId: flights.getParams()?.selectedFlightsTrackingId || null,
-        viewerTrackedId: window.__godsEyeView.viewer.trackedEntity?.gevTrackedId || null,
+        viewerTrackedId: window.__qaFollowed()?.key || null,
       };
     });
     record(
@@ -764,7 +937,7 @@ async function main() {
     const latchedShare = await evalPage(() => ({
       tracked: window.__godsEyeView.dataManager.layers
         .get('flights').module.getTrackedInfo()?.icao24 || null,
-      viewerTrackedId: window.__godsEyeView.viewer.trackedEntity?.gevTrackedId || null,
+      viewerTrackedId: window.__qaFollowed()?.key || null,
     }));
     record(
       'share-v2: the pending subject latches on when it arrives on a later poll',
@@ -792,7 +965,7 @@ async function main() {
     // the voice tools they never wrote the SHARED context slot that
     // `get_entity_context` reads. So with a plane plainly selected on screen,
     // `{scope:'selected'}` silently downgraded to `'in_view'` and the model
-    // answered "there isn't a plane currently selected" (field session,
+    // answered "there isn't a plane currently selected" (owner field session,
     // 2026-08-21). Drives the real tool runner; costs no model turns.
     // ============================================================
     console.log('\nVoice entity context — a click-selected contact answers scope:selected');
@@ -1128,7 +1301,7 @@ async function main() {
       // `set_context_mode` takes 'contacts', and state surfaces reported the
       // internal id: the model read `mode:'flights'`, concluded Contacts was
       // off, and refused to answer from the Contacts window counts carried in
-      // the same payload (field session, 2026-08-21).
+      // the same payload (owner field session, 2026-08-21).
       // ============================================================
       console.log('\nContext vocabulary — state output speaks the tools\' own words');
       const manualContacts = await evalPage(async () => {
@@ -1278,11 +1451,11 @@ async function main() {
       );
     }
 
-    // NOTE: we do NOT manually reposition the camera. Tracking sets
-    // viewer.trackedEntity + a calibrated viewFrom, so the follow camera lands
-    // in the few-km band (altitude*1.1+2500, clamped 3–30 km) — far below the
-    // MODEL_ALT_CEIL_M = 800 km ceiling, so _modelRegimeActive() is true and the
-    // standalone tracked model renders. That's the exact path the invariants
+    // NOTE: we do NOT manually reposition the camera. Tracking follows the
+    // plane with a calibrated viewFrom, so the follow camera lands
+    // in the few-km band (altitude*1.1+2500, clamped 3–30 km) — below the
+    // MODEL_ALT_CEIL_M ceiling, so _modelRegimeActive() is true; the checks below
+    // zoom in to within the 3 km model range so the standalone tracked model renders. That's the exact path the invariants
     // protect, so we exercise it rather than a synthetic setView.
 
     // ============================================================
@@ -1324,12 +1497,12 @@ async function main() {
         // report the neighbor's id even though the correct tracked model is up.
         const trackedInfo = fl.getTrackedInfo();
         const exactPickModel = trackedInfo
-          ? pool.find((model) => String(model.id) === trackedInfo.icao24)
+          ? pool.find((model) => window.__qaModelIcao(model) === trackedInfo.icao24)
           : null;
         if (exactPickModel) return exactPickModel;
-        const ent = window.__godsEyeView.viewer.trackedEntity;
+        const followed = window.__qaFollowed();
         let tracked = null;
-        if (ent && typeof ent.gevDisplayPosition === 'function') tracked = ent.gevDisplayPosition();
+        if (typeof followed?.displayPosition === 'function') tracked = followed.displayPosition();
         if (!tracked) return pool[0];
         let best = null, bestD = Infinity;
         for (const m of pool) {
@@ -1345,16 +1518,34 @@ async function main() {
         // is "tracked model not up yet", not a match.
         return bestD < 1000 * 1000 ? best : null;
       };
+      // Models draw only within 3 km of the camera, and the follow camera
+      // frames a cruising plane from farther out: zoom in on the followed
+      // plane until it is within `metres`. Returns the distance reached.
+      window.__qaFollowWithin = async function (metres) {
+        const v = window.__godsEyeView.viewer;
+        for (let i = 0; i < 20; i++) {
+          const followed = window.__qaFollowed();
+          const t = typeof followed?.displayPosition === 'function' ? followed.displayPosition() : null;
+          if (!t) return null;
+          const c = v.camera.positionWC;
+          const d = Math.hypot(c.x - t.x, c.y - t.y, c.z - t.z);
+          if (d <= metres) return d;
+          v.camera.zoomIn(d - metres * 0.8);
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        }
+        return null;
+      };
     });
 
-    // Track a synthetic commercial plane. Tracking sets viewer.trackedEntity +
-    // viewFrom, so the follow camera lands in the few-km band and the standalone
-    // 3D model renders (model regime active below the 800 km ceiling).
+    // Track a synthetic commercial plane, then zoom the follow camera to
+    // within 2 km of it: models draw only within 3 km, so the standalone 3D
+    // model renders there.
     const trackedIcao = SYNTH.flights[0].icao;
     await evalPage((icao) => {
       window.__godsEyeView.dataManager.layers.get('flights').module.trackById(icao);
     }, trackedIcao);
-    await sleep(1500); // let the follow camera settle + the GLB load kick off
+    await sleep(1500); // let the follow camera settle
+    await evalPage(() => window.__qaFollowWithin(2000));
 
     // Wait until the tracked Cesium.Model primitive exists, is ready & shown.
     const modelUp = await page.waitForFunction((icao) => {
@@ -1362,7 +1553,7 @@ async function main() {
       const ti = fl.getTrackedInfo();
       if (!ti || ti.icao24 !== icao) return false;
       const found = window.__findTrackedModel ? window.__findTrackedModel() : null;
-      return !!(found && found.ready && found.show && String(found.id) === icao);
+      return !!(found && found.ready && found.show && window.__qaModelIcao(found) === icao);
     }, { timeout: 60000, polling: 250 }, trackedIcao).then(() => true).catch(() => false);
     record('3D: tracked commercial model becomes ready through the DISPLAY toggle', modelUp,
       modelUp ? `ready+shown id=${trackedIcao}` : 'tracked product model never became ready+shown');
@@ -1375,8 +1566,8 @@ async function main() {
       jitterResult = await sampleFrames(page, 30, (icao) => {
         const dm = window.__godsEyeView.dataManager;
         const fl = dm.layers.get('flights').module;
-        const ent = window.__godsEyeView.viewer.trackedEntity;
-        const disp = ent && typeof ent.gevDisplayPosition === 'function' ? ent.gevDisplayPosition() : null;
+        const followed = window.__qaFollowed();
+        const disp = typeof followed?.displayPosition === 'function' ? followed.displayPosition() : null;
         const dets = fl.getDetectableObjects({ maxCount: 1000 });
         const me = dets.find((d) => d.id === icao || d.id === (fl.getTrackedInfo() && fl.getTrackedInfo().callsign));
         if (!disp || !me || !me.position) return null;
@@ -1385,8 +1576,8 @@ async function main() {
       }, trackedIcao);
       console.log('  (3D model did not render under SwiftShader; testing the shared display-position contract directly)');
     } else {
-      // Full check: independently transform airplane.glb's measured AABB centre
-      // through the actual 3D model matrix, then compare it with detection.
+      // Full check: independently transform the fleet model's visual centre
+      // (its origin) through the actual 3D model matrix, then compare it with detection.
       // glTF [x,y,z] → Cesium-local [x,-z,y]. The effective rendered
       // computedScale is separate from modelMatrix and includes any
       // minimumPixelSize enlargement, so include it just as the renderer does.
@@ -1400,7 +1591,7 @@ async function main() {
         const scale = Number.isFinite(model.computedScale)
           ? model.computedScale
           : (Number.isFinite(model.scale) ? model.scale : 1);
-        // airplane.glb is now bounding-box centred with transforms applied.
+        // Fleet models are drawn about their origin, transforms applied.
         const x = 0 * scale;
         const y = 0 * scale;
         const z = 0 * scale;
@@ -1433,6 +1624,138 @@ async function main() {
       const maxDelta = Math.max(...samples);
       record('jitter: max|visual centre − detectable| ≈ 0 over frames', maxDelta <= JITTER_TOL_M,
         `max=${maxDelta.toFixed(3)} m over ${samples.length} frames (tol ${JITTER_TOL_M} m, mode=${modelUp ? 'model-matrix' : 'display-contract'})`);
+    }
+
+    // ============================================================
+    // TRAIL HEAD ENDS AT THE DRAWN ICON, every rendered frame.
+    //   The head's last vertex is where the tracked plane is drawn (the
+    //   display position, or the model's tail anchor while the model is the
+    //   visual). getTrackedInfo reports the dead-reckoned position without
+    //   the brief post-report easing; its gap is logged, not asserted.
+    // ============================================================
+    console.log('\nTrail head — ends at the drawn icon on every frame');
+    // The fixture planes repeat one position, so the icon holds and draws no
+    // head. Fly the tracked one east for this check; the display runs 30 s
+    // behind, so give it time to reach the moving reports.
+    await evalPage(async (icao) => {
+      const { rendererOf } = await import(`${window.__gevQaSourceBase || '/src'}/render/rendererOf.js`);
+      const app = window.__godsEyeView;
+      const fl = app.dataManager.layers.get('flights').module;
+      // Observe this selection's actual draw-port submissions: trails no
+      // longer live in viewer.entities. Disabling destroys the reused trail
+      // set, so this selection creates one the probe can identify.
+      await app.dataManager.setEnabled('flights', false);
+      const draw = rendererOf(app.viewer).draw;
+      const createLines = draw.lines;
+      let head = null;
+      let trail = null;
+      draw.lines = function (spec) {
+        const set = createLines.call(this, spec);
+        if (!spec.id.startsWith('trail:')) return set;
+        draw.lines = createLines;
+        trail = set;
+        const upsert = set.upsert;
+        set.upsert = function (items) {
+          const result = upsert.call(this, items);
+          for (const item of items)
+            if (/^gev-trail:\d+:head$/.test(item.id)) head = item;
+          return result;
+        };
+        const clear = set.clear;
+        set.clear = function () { head = null; return clear.call(this); };
+        const dispose = set.dispose;
+        set.dispose = function () { head = null; trail = null; return dispose.call(this); };
+        return set;
+      };
+      window.__qaTrailHead = () => trail?.show && head?.show !== false ? head?.positions : null;
+      window.__qaRestoreTrailProbe = () => { draw.lines = createLines; };
+      await app.dataManager.setEnabled('flights', true);
+      if (!fl.trackById(icao)) throw new Error('trail fixture could not reselect its aircraft');
+      const f = window.__SYNTH.flights.find((p) => p.icao === icao);
+      f.moveFromMs = Date.now();
+    }, trackedIcao);
+    await sleep(55_000);
+    const headSamples = await sampleFrames(page, 40, (icao) => {
+      const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
+      const line = window.__qaTrailHead();
+      const drawn = window.__qaFollowed()?.position?.();
+      if (!line?.length || !drawn) return null;
+      const end = line[line.length - 1];
+      const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+      const ti = fl.getTrackedInfo();
+      let infoGap = null;
+      if (ti && ti.icao24 === icao) {
+        // WGS84 lat/lon → ECEF on the ellipsoid; the angle at the centre to
+        // the drawn position, times the mean radius, is the ground gap.
+        const a = 6378137, e2 = 6.69437999014e-3;
+        const lat = (ti.latitude * Math.PI) / 180, lon = (ti.longitude * Math.PI) / 180;
+        const n = a / Math.sqrt(1 - e2 * Math.sin(lat) ** 2);
+        const p = {
+          x: n * Math.cos(lat) * Math.cos(lon),
+          y: n * Math.cos(lat) * Math.sin(lon),
+          z: n * (1 - e2) * Math.sin(lat),
+        };
+        const dot = p.x * drawn.x + p.y * drawn.y + p.z * drawn.z;
+        const cos = dot / (Math.hypot(p.x, p.y, p.z) * Math.hypot(drawn.x, drawn.y, drawn.z));
+        infoGap = 6371008.8 * Math.acos(Math.min(1, cos));
+      }
+      // While the 3D model is the visual the head ends at the model's tail
+      // anchor, which sits on the drawn (pixel-size-enlarged) model.
+      const model = window.__findTrackedModel ? window.__findTrackedModel() : null;
+      const sphere = model && model.ready && model.show ? model.boundingSphere : null;
+      // boundingSphere leaves out the minimum-pixel-size enlargement that
+      // computedScale carries; the drawn model is that much larger.
+      const enlarge = sphere && Number.isFinite(model.computedScale) && model.scale > 0
+        ? Math.max(1, model.computedScale / model.scale)
+        : 1;
+      const radius = sphere ? sphere.radius * enlarge : null;
+      return {
+        end: dist(end, drawn),
+        onModel: sphere ? dist(end, sphere.center) <= radius + 50 : false,
+        modelRadius: radius,
+        infoGap,
+        vertices: line.length,
+      };
+    }, trackedIcao);
+    // The same reading between frames, the way a page script polls it: the
+    // head holds the last rendered frame while getTrackedInfo dead-reckons
+    // the current instant. Logged only, to tell the two apart.
+    const betweenFrames = [];
+    for (let i = 0; i < 8; i++) {
+      await sleep(600);
+      betweenFrames.push(await evalPage((icao) => {
+        const line = window.__qaTrailHead();
+        const drawn = window.__qaFollowed()?.position?.();
+        if (!line?.length || !drawn) return null;
+        const end = line[line.length - 1];
+        return Math.hypot(end.x - drawn.x, end.y - drawn.y, end.z - drawn.z);
+      }, trackedIcao));
+    }
+    console.log(`  (between frames: head end vs entity position, m: ${
+      betweenFrames.map((v) => (v == null ? '-' : v.toFixed(1))).join(' ')})`);
+    // Freeze the plane where it got to, so later checks see a still contact.
+    await evalPage((icao) => {
+      const f = window.__SYNTH.flights.find((p) => p.icao === icao);
+      f.lon += (f.vel * (Date.now() - f.moveFromMs)) / 1000
+        / (111320 * Math.cos((f.lat * Math.PI) / 180));
+      delete f.moveFromMs;
+      window.__qaRestoreTrailProbe();
+    }, trackedIcao);
+    const headUsable = headSamples.values.filter((v) => v != null);
+    if (headUsable.length < 10) {
+      record('trail head: ends at the drawn icon on every frame', false,
+        `only ${headUsable.length} frames with a drawn head (timedOut=${headSamples.timedOut})`);
+    } else {
+      const worst = Math.max(...headUsable.map((v) => v.end));
+      const off = headUsable.filter((v) => !(v.end <= 50 || v.onModel));
+      const onModel = headUsable.filter((v) => v.end > 50 && v.onModel).length;
+      const radii = headUsable.map((v) => v.modelRadius).filter((v) => v != null);
+      const gaps = headUsable.map((v) => v.infoGap).filter((v) => v != null);
+      record('trail head: last vertex on the drawn icon (within 50 m, or on the drawn 3D model) on every frame',
+        off.length === 0,
+        `${off.length} of ${headUsable.length} frames off; max end-to-centre=${worst.toFixed(1)} m, ${onModel} frames ending on the model's tail (model radius ${
+          radii.length ? Math.max(...radii).toFixed(0) : 'n/a'} m); getTrackedInfo vs drawn icon max=${
+          gaps.length ? Math.max(...gaps).toFixed(1) : 'n/a'} m (logged only)`);
     }
 
     // ============================================================
@@ -1521,7 +1844,7 @@ async function main() {
       mil.trackById(hex);
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       const milTrackedBefore = !!mil.getTrackedInfo();
-      fl.trackById(icao); // tracking commercial flips viewer.trackedEntity → military listener fires
+      fl.trackById(icao); // tracking commercial changes what the camera follows → military listener fires
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       return {
         milTrackedBefore,
@@ -1568,7 +1891,8 @@ async function main() {
     await evalPage((icao) => {
       window.__godsEyeView.dataManager.layers.get('flights').module.trackById(icao);
     }, h1Icao);
-    await sleep(1500); // follow camera settles; tracked GLB load kicks off
+    await sleep(1500); // follow camera settles
+    await evalPage(() => window.__qaFollowWithin(2000)); // within the 3 km model range
 
     // (i) The tracked standalone model must expose its pick id (= the icao).
     const h1ModelUp = await page.waitForFunction((icao) => {
@@ -1576,16 +1900,22 @@ async function main() {
       const ti = fl.getTrackedInfo();
       if (!ti || ti.icao24 !== icao) return false;
       const found = window.__findTrackedModel ? window.__findTrackedModel() : null;
-      return !!(found && found.ready && found.show && String(found.id) === icao);
+      return !!(found && found.ready && found.show && window.__qaModelIcao(found) === icao);
     }, { timeout: 60000, polling: 250 }, h1Icao).then(() => true).catch(() => false);
 
     if (h1ModelUp) {
       const modelPickId = await evalPage(() => {
         const m = window.__findTrackedModel();
-        return m && m.id !== undefined && m.id !== null ? String(m.id) : null;
+        if (!m || m.id === undefined || m.id === null) return null;
+        // The draw port's pick id is `{set, id}`: the click resolver keys on
+        // both, so the set must be this layer's tracked model set.
+        if (typeof m.id === 'object') return { set: String(m.id.set), id: String(m.id.id) };
+        return { set: null, id: String(m.id) };
       });
-      record('H1: tracked standalone model exposes its pick id', modelPickId === h1Icao,
-        `model.id=${JSON.stringify(modelPickId)} (want "${h1Icao}")`);
+      record('H1: tracked standalone model exposes its pick id',
+        modelPickId?.id === h1Icao
+          && (modelPickId.set === null || modelPickId.set.startsWith('flights-tracked-model:')),
+        `model.id=${JSON.stringify(modelPickId)} (want id "${h1Icao}" in the flights tracked-model set)`);
     } else if (!glbBackendCapable) {
       skip('H1: tracked standalone model exposes its pick id',
         `independent GLB control unavailable (${glbControlDetail})`);
@@ -1604,15 +1934,21 @@ async function main() {
       const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
       const ti = fl.getTrackedInfo();
       if (!ti) return null;
-      const ent = v.trackedEntity;
-      const disp = ent && typeof ent.gevDisplayPosition === 'function' ? ent.gevDisplayPosition() : null;
+      const followed = window.__qaFollowed();
+      const disp = typeof followed?.displayPosition === 'function' ? followed.displayPosition() : null;
       const pos = disp || ti.position;
       if (!pos) return null;
       const center = v.scene.cartesianToCanvasCoordinates(pos);
       if (!center) return null;
+      // The tracked plane is drawn by the layer's own tracked icon and
+      // tracked model sets; a pick on either names `{set, id}`.
       const isTrackedPick = (picked) => {
         if (!picked) return null;
-        if (picked.id === ent) return 'entity';
+        const hit = picked.id && typeof picked.id === 'object' ? picked.id : null;
+        if (hit && String(hit.id) === ti.icao24 && typeof hit.set === 'string') {
+          if (hit.set.startsWith('flights-tracked-icon:')) return 'tracked-icon';
+          if (hit.set.startsWith('flights-tracked-model:')) return 'tracked-model';
+        }
         const raw = typeof picked.id === 'string' ? picked.id : (picked.primitive && picked.primitive.id);
         return raw === ti.icao24 ? 'icao-pick' : null;
       };
@@ -1670,7 +2006,7 @@ async function main() {
       }, 45);
       const h1StillTracking = await evalPage((icao) => {
         const ti = window.__godsEyeView.dataManager.layers.get('flights').module.getTrackedInfo();
-        return !!(ti && ti.icao24 === icao) && !!window.__godsEyeView.viewer.trackedEntity;
+        return !!(ti && ti.icao24 === icao) && !!window.__qaFollowed();
       }, h1Icao);
       record('H1: click on tracked plane keeps tracking (no deselect)', h1StillTracking,
         `picked via ${h1ClickPoint.via}; still tracking=${h1StillTracking}`);
@@ -1681,9 +2017,10 @@ async function main() {
 
     // ============================================================
     // REGRESSION M3 (rewritten 2026-07-02 — deliberate behavior change):
-    // when the TRACKED plane ages out (3 missed polls), tracking must clear
-    // and the camera must be RELEASED IN PLACE — viewer.trackedEntity
-    // undefined and NO jump (the old contract flew an ~80 km overview; the
+    // when the TRACKED plane ages out (10 min after its newest fix, past the
+    // 3 missed polls that remove an untracked plane), tracking must clear
+    // and the camera must be RELEASED IN PLACE — following nothing
+    // and NO jump (the old contract flew an ~80 km overview; the
     // owner field-ruled that wrong: "it randomly zooms way up and loses my
     // context"). The M3 ordering fix stays: tracking is cleared BEFORE the
     // removal loop deletes the plane's state, so we never sit mid-follow
@@ -1702,31 +2039,52 @@ async function main() {
       const beforeTracking = !!fl.getTrackedInfo();
       // Simulate the age-out via the shim: the plane stops arriving.
       window.__SYNTH.flights = window.__SYNTH.flights.filter((f) => f.icao !== icao);
-      // MISSING_POLL_LIMIT = 3 consecutive absent polls → removal + clear.
-      // Capture the camera pose right BEFORE the removing poll — the follow
-      // camera drifts with the coasting plane until the instant of release,
-      // so this is the "where the user was looking" reference.
+      // The tracked plane outlives MISSING_POLL_LIMIT (3 absent polls): it is
+      // kept until 10 min after its newest fix, so the camera keeps its target.
       await fl.update(v);
       await fl.update(v);
-      const c0 = v.camera.positionCartographic;
-      const atAgeOut = {
-        lonDeg: (c0.longitude * 180) / Math.PI,
-        latDeg: (c0.latitude * 180) / Math.PI,
-        height: c0.height,
-      };
-      await fl.update(v); // third miss → removal + clear + in-place release
-      return {
-        beforeTracking,
-        atAgeOut,
-        stillTrackedAfter: !!fl.getTrackedInfo(),
-        viewerStillTracking: !!v.trackedEntity,
-      };
+      await fl.update(v);
+      const trackedThroughMisses = !!fl.getTrackedInfo();
+      // Jump the page clock past the 10 min retention instead of waiting.
+      const realNow = Date.now;
+      Date.now = () => realNow() + 11 * 60 * 1000;
+      try {
+        // Let the follow camera settle on the stopped plane, then capture the
+        // pose right BEFORE the removing poll: the "where the user was
+        // looking" reference.
+        await new Promise((res) => {
+          const stop = v.scene.postRender.addEventListener(() => {
+            stop();
+            res();
+          });
+          v.scene.requestRender();
+        });
+        const c0 = v.camera.positionCartographic;
+        const atAgeOut = {
+          lonDeg: (c0.longitude * 180) / Math.PI,
+          latDeg: (c0.latitude * 180) / Math.PI,
+          height: c0.height,
+        };
+        await fl.update(v); // past retention → removal + clear + in-place release
+        return {
+          beforeTracking,
+          trackedThroughMisses,
+          atAgeOut,
+          stillTrackedAfter: !!fl.getTrackedInfo(),
+          viewerStillTracking: !!window.__qaFollowed(),
+        };
+      } finally {
+        Date.now = realNow;
+      }
     }, m3Icao);
 
+    record('M3: the tracked plane stays tracked through 3 missed polls (kept 10 min after its newest fix)',
+      m3.trackedThroughMisses,
+      `trackedThroughMisses=${m3.trackedThroughMisses}`);
     record('M3: tracking cleared after the tracked plane ages out (getTrackedInfo null)',
       m3.beforeTracking && !m3.stillTrackedAfter,
       `before=${m3.beforeTracking} trackedAfter=${m3.stillTrackedAfter}`);
-    record('M3: camera released after age-out (viewer.trackedEntity undefined)',
+    record('M3: camera released after age-out (the camera follows nothing)',
       !m3.viewerStillTracking,
       `viewerTracked=${m3.viewerStillTracking}`);
 
@@ -1851,16 +2209,17 @@ async function main() {
       const v = window.__godsEyeView.viewer;
       const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
       const labelText = () => {
-        const ent = v.trackedEntity;
+        const ent = window.__qaFollowed();
         if (!ent) return null;
         // Post overlay-unification the tracked text lives in the host
         // presentation model (entities are asserted native-label-free);
         // the native read stays as a fallback so this probe still fails
         // loudly if BOTH surfaces are ever absent.
-        const model = ent.gevLabelModel;
+        const model = ent.labelModel;
         if (model) return [model.title, ...(model.details || [])].filter(Boolean).join('\n');
-        if (!ent.label || !ent.label.text) return null;
-        const t = ent.label.text;
+        const label = ent.entity?.label;
+        if (!label || !label.text) return null;
+        const t = label.text;
         return typeof t === 'string' ? t : (t.getValue ? String(t.getValue(v.clock.currentTime)) : null);
       };
       // Track a cruise plane that IS in the feed (aaa003: 8700 m, 250 m/s —
@@ -1889,7 +2248,7 @@ async function main() {
     // ============================================================
     // CHANGE 3 (2026-07-03): ground traffic is a FEATURE. Present-but-
     // grounded planes render FULL-STRENGTH in the airborne tint pipeline
-    // (white / amber-military — validated behavior, same-day reversal of the
+    // (white / amber-military — owner verdict, same-day reversal of the
     // day-1 gray 50%-alpha muted style: "just leave them as white … in NYC
     // I can barely see them") at ×0.8 scale; "on the ground" reads from
     // scale + no trail, never from a fade, so the 45%-alpha stale fade
@@ -1905,19 +2264,7 @@ async function main() {
       const fl = dm.layers.get('flights').module;
       const mil = dm.layers.get('military').module;
       const findBB = (id) => {
-        let found = null;
-        const walk = (coll) => {
-          const n = coll.length;
-          for (let i = 0; i < n; i++) {
-            let p;
-            try { p = coll.get(i); } catch { continue; }
-            if (!p) continue;
-            if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-            if (p.image !== undefined && p.alignedAxis !== undefined && p.id === id) found = p;
-          }
-        };
-        walk(v.scene.primitives);
-        return found;
+        return window.__qaFindIcon(id);
       };
       const snap = (id) => {
         const bb = findBB(id);
@@ -1968,7 +2315,7 @@ async function main() {
       };
     });
     const fmtSnap = (s) => (s ? `show=${s.show} scale=${s.scale.toFixed(3)} rgba=(${s.red.toFixed(2)},${s.green.toFixed(2)},${s.blue.toFixed(2)},${s.alpha.toFixed(2)})` : 'missing');
-    // Ground style (validated behavior 2026-07-03): FULL-ALPHA airborne tint —
+    // Ground style (owner verdict 2026-07-03): FULL-ALPHA airborne tint —
     // white in the flights layer, amber (#FFB800) in the military layer —
     // never the 45%-alpha stale fade, never the retired gray mute. The
     // ground cue is the ×0.8 scale (klass default ⇒ base 1.0).
@@ -1992,7 +2339,7 @@ async function main() {
     // Fix 2 (2026-07-03 field test): ground planes VANISHED when zooming into
     // airports — grounded altitudes sit at/below the photoreal tile skin, so the
     // depth test buried the billboard up close (log-depth imprecision let it win
-    // from orbit). RE-PINNED for round 5 (product invariant 2026-07-06: "I just
+    // from orbit). RE-PINNED for round 5 (owner directive 2026-07-06: "I just
     // want the planes and their lines to ALWAYS be visible... evenly
     // applied"): EVERY billboard — grounded, airborne, before and after a
     // ground flip — renders with disableDepthTestDistance = +Infinity. The
@@ -2007,7 +2354,7 @@ async function main() {
       `flights=${ground.groundSnap?.ddtd} mil=${ground.milGroundSnap?.ddtd} takeoff=${ground.airSnap?.ddtd} landing=${ground.groundAgainSnap?.ddtd}`);
 
     // ============================================================
-    // GROUND 3D (2026-07-03, product rule LOCKED): "when I have 3D mode —
+    // GROUND 3D (2026-07-03, owner decision LOCKED): "when I have 3D mode —
     // proximity or all — I want that respected regardless of whether a plane
     // is on the ground or in the air. No distinction."
     //  (a) a synthetic on_ground plane is model-ELIGIBLE (not skipped),
@@ -2034,18 +2381,12 @@ async function main() {
     // ============================================================
     console.log('\nGround 3D — grounded planes are model-eligible + snapped to the sampled skin');
     const GROUND3D_STUB_H = 187.5; // stubbed tile-skin height (m, ellipsoid)
-    // Expected belly offsets (m): native origin-above-lowest-vertex × MODEL_SCALE
-    // × CLASS_SCALE_3D[klass] — constants match the layers' MODEL_BELLY_OFFSET_NATIVE
-    // / MODEL_SCALE pairs, which modelScale.test.mjs locks against the GLBs.
-    // Class is computed with the REAL classifier on the synthetic feed fields.
-    const g3dFlKlass = classifyAircraft({ typeCode: null, category: null });
-    const g3dMilKlass = classifyAircraft({ typeCode: 'C130', category: undefined });
-    const g3dFlOffset = 6.719 * 1 * (CLASS_SCALE_3D[g3dFlKlass] || 1); // airplane.glb, flights
-    // Hangar fleet (2026-08-16): military C130 → turboprop → the real atr72.glb,
-    // whose belly offset is the registry's measured bellyM (meters, scale 1) —
-    // NOT the jet.glb 5.631 × class formula. Pinned by modelScale.test.mjs.
-    const g3dMilOffset = CLASS_MODEL_REAL[g3dMilKlass]?.bellyM
-      ?? 5.631 * 1 * (CLASS_SCALE_3D[g3dMilKlass] || 1); // jet.glb fallback classes
+    // Expected belly offsets (m): the fleet model's wheel clearance at its
+    // life-size scale, the model chosen as the layers choose it
+    // (aircraftModelSpec) from the synthetic feed's fields: no type for the
+    // flights contact (the default airliner), a C130 for the military one.
+    const g3dFlOffset = aircraftModelSpec(FLEET_SET, { typeCode: null }).clearanceM;
+    const g3dMilOffset = aircraftModelSpec(FLEET_SET, { typeCode: 'C130' }).clearanceM;
     // Height-datum fix (Task 6): the flights-layer billboard for a grounded synthetic
     // (no geo_altitude in this stub feed, no warm terrain-height cache in a headless
     // run) now renders at baroM + geoidHeight(lat, lon) rather than the raw baro
@@ -2067,38 +2408,128 @@ async function main() {
     await ensureGeoidReady();
     const g3dFlGeoidN = geoidHeight(30.2668, -97.7445); // aaa077's lat/lon (Austin)
 
-    const g3dSetup = await evalPage(() => {
-      const gev = window.__godsEyeView;
-      const scene = gev.viewer.scene;
-      const dm = gev.dataManager;
-      // 3D models on (QA param) — the product rule under test.
-      dm.layers.get('flights').module.setParams({ models3d: true });
-      dm.layers.get('military').module.setParams({ models3d: true });
-      // Force the ground snap's tiles-ready gate open (b9b pattern): headless the
-      // Google tileset never finishes streaming, so tilesLoaded stays false.
-      let tilesForced = false;
-      try {
-        if (gev.tileset) {
-          Object.defineProperty(gev.tileset, 'tilesLoaded', { value: true, configurable: true });
-          tilesForced = gev.tileset.tilesLoaded === true;
-        } else {
-          tilesForced = true; // no tileset → groundSnap treats tiles as ready
+    let g3dSetup = null;
+    let g3dPrimaryFailure = null;
+    let g3dCleanupFailure = null;
+    try {
+      g3dSetup = await evalPage(() => {
+        const gev = window.__godsEyeView;
+        const scene = gev.viewer.scene;
+        const dm = gev.dataManager;
+        const flights = dm.layers.get('flights').module;
+        const military = dm.layers.get('military').module;
+        const priorModels3d = {
+          flights: flights.getParams().models3d,
+          military: military.getParams().models3d,
+        };
+        const priorSampleHeight = scene.sampleHeight;
+        // Keep the previous run-wide no-height seam in the page. Functions cannot
+        // cross the Puppeteer serialization boundary, so cleanup restores it from
+        // this private slot instead of deleting the scene's own property.
+        window.__g3dPriorSampleHeight = priorSampleHeight;
+        window.__g3dPriorTilesLoadedDescriptor = gev.tileset
+          ? Object.getOwnPropertyDescriptor(gev.tileset, 'tilesLoaded')
+          : null;
+        try {
+          // 3D models on (QA param) — the owner decision under test.
+          flights.setParams({ models3d: true });
+          military.setParams({ models3d: true });
+          // Force the ground snap's tiles-ready gate open (b9b pattern): headless the
+          // Google tileset never finishes streaming, so tilesLoaded stays false.
+          let tilesForced = false;
+          try {
+            if (gev.tileset) {
+              Object.defineProperty(gev.tileset, 'tilesLoaded', { value: true, configurable: true });
+              tilesForced = gev.tileset.tilesLoaded === true;
+            } else {
+              tilesForced = true; // no tileset → groundSnap treats tiles as ready
+            }
+          } catch { tilesForced = false; }
+          // Deterministic sampleHeight stub + call counter (headless has no real skin).
+          window.__g3dSampleCalls = 0;
+          window.__g3dSampleHits = { flights: 0, military: 0 };
+          const fixturePoints = {
+            flights: { lat: 30.2668, lon: -97.7445 },
+            military: { lat: 30.2685, lon: -97.7470 },
+          };
+          scene.sampleHeight = function (cartographic) {
+            window.__g3dSampleCalls += 1;
+            // Attribute each sample to the fixture's distinct ~111 m mesh cell.
+            // This prevents one successfully sampled contact from satisfying the
+            // two-contact integrity assertion below.
+            const lat = Number(cartographic?.latitude) * 180 / Math.PI;
+            const lon = Number(cartographic?.longitude) * 180 / Math.PI;
+            if (Number.isFinite(lat) && Number.isFinite(lon)) {
+              for (const [layer, target] of Object.entries(fixturePoints)) {
+                const dLat = lat - target.lat;
+                const dLon = (lon - target.lon) * Math.cos(target.lat * Math.PI / 180);
+                // 0.0008° encloses the fixture's rounded 0.001° mesh-cell
+                // sample but cannot overlap the other fixture ~300 m away.
+                if (Math.hypot(dLat, dLon) <= 0.0008) {
+                  window.__g3dSampleHits[layer] += 1;
+                }
+              }
+            }
+            return 187.5;
+          };
+          return { tilesForced, priorModels3d };
+        } catch (error) {
+          // Setup is transactional: once the first fixture mutation lands, every
+          // later setup failure restores each owned seam independently. Return
+          // both outcomes across the page boundary so rollback cannot hide or
+          // replace the primary setup error.
+          const rollbackFailures = [];
+          const attemptRollback = (label, operation) => {
+            try { operation(); } catch (rollbackError) {
+              rollbackFailures.push(`${label}: ${rollbackError?.message || rollbackError}`);
+            }
+          };
+          attemptRollback('restore sampleHeight seam', () => {
+            scene.sampleHeight = priorSampleHeight;
+          });
+          attemptRollback('restore tilesLoaded seam', () => {
+            if (!gev.tileset) return;
+            const prior = window.__g3dPriorTilesLoadedDescriptor;
+            if (prior) Object.defineProperty(gev.tileset, 'tilesLoaded', prior);
+            else delete gev.tileset.tilesLoaded;
+          });
+          attemptRollback('restore flights models3d', () => {
+            flights.setParams({ models3d: priorModels3d.flights });
+          });
+          attemptRollback('restore military models3d', () => {
+            military.setParams({ models3d: priorModels3d.military });
+          });
+          attemptRollback('delete fixture globals', () => {
+            delete window.__g3dPriorSampleHeight;
+            delete window.__g3dPriorTilesLoadedDescriptor;
+            delete window.__g3dSampleCalls;
+            delete window.__g3dSampleHits;
+          });
+          return {
+            setupFailure: error?.message || String(error),
+            rollbackFailures,
+            priorModels3d,
+          };
         }
-      } catch { tilesForced = false; }
-      // Deterministic sampleHeight stub + call counter (headless has no real skin).
-      window.__g3dSampleCalls = 0;
-      scene.sampleHeight = function () {
-        window.__g3dSampleCalls += 1;
-        return 187.5;
-      };
-      return { tilesForced };
-    });
-    record('ground-3d: sampleHeight stub installed + tiles-ready forced', g3dSetup.tilesForced,
-      JSON.stringify(g3dSetup));
+      });
+      if (g3dSetup.setupFailure) {
+        g3dPrimaryFailure = new Error(`ground-3d setup failed: ${g3dSetup.setupFailure}`);
+        if (g3dSetup.rollbackFailures.length > 0) {
+          g3dCleanupFailure = new Error(
+            `ground-3d setup rollback failed: ${g3dSetup.rollbackFailures.join(' | ')}`,
+          );
+        }
+        // Setup rollback already attempted every owned seam. Prevent the
+        // post-setup cleanup from running against deleted fixture globals.
+        g3dSetup = null;
+        throw g3dPrimaryFailure;
+      }
+      record('ground-3d: sampleHeight stub installed + tiles-ready forced', g3dSetup.tilesForced,
+        JSON.stringify(g3dSetup));
 
-    // Ingest one grounded plane per layer, then park the camera 8 km above them
-    // (inside the model regime + add radius; on-screen so they win cap slots).
-    const g3dIngest = await evalPage(async () => {
+      // Ingest one grounded plane per layer, then park the camera 8 km above them
+      // (inside the model regime + add radius; on-screen so they win cap slots).
+      const g3dIngest = await evalPage(async () => {
       const v = window.__godsEyeView.viewer;
       const dm = window.__godsEyeView.dataManager;
       const fl = dm.layers.get('flights').module;
@@ -2108,38 +2539,27 @@ async function main() {
       await fl.update(v);
       await mil.update(v);
       const findBB = (id) => {
-        let found = null;
-        const walk = (coll) => {
-          const n = coll.length;
-          for (let i = 0; i < n; i++) {
-            let p;
-            try { p = coll.get(i); } catch { continue; }
-            if (!p) continue;
-            if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-            if (p.image !== undefined && p.alignedAxis !== undefined && p.id === id) found = p;
-          }
-        };
-        walk(v.scene.primitives);
-        return found;
+        return window.__qaFindIcon(id);
       };
       const flBB = findBB('aaa077');
       const milBB = findBB('bbb177');
       if (!flBB || !milBB) return { error: `ground billboards missing (fl=${!!flBB} mil=${!!milBB})` };
       const radius = (pos) => Math.hypot(pos.x, pos.y, pos.z);
-      // Park the camera 8 km radially above the flights plane (both in view nadir-ish).
+      // Park the camera 2 km radially above the flights plane (both in view
+      // nadir-ish, both within the 3 km model range).
       const p = flBB.position;
       const r = Math.hypot(p.x, p.y, p.z);
-      const k = (r + 8000) / r;
+      const k = (r + 2000) / r;
       v.camera.cancelFlight();
       v.camera.setView({
         destination: { x: p.x * k, y: p.y * k, z: p.z * k },
         orientation: { heading: 0, pitch: -Math.PI / 2, roll: 0 },
       });
       return { flBBRadius: radius(flBB.position), milBBRadius: radius(milBB.position) };
-    });
-    if (g3dIngest.error) {
-      record('ground-3d: grounded synthetics ingested', false, g3dIngest.error);
-    } else {
+      });
+      if (g3dIngest.error) {
+        record('ground-3d: grounded synthetics ingested', false, g3dIngest.error);
+      } else {
       record('ground-3d: grounded synthetics ingested', true,
         `bb radii fl=${g3dIngest.flBBRadius.toFixed(1)} mil=${g3dIngest.milBBRadius.toFixed(1)}`);
 
@@ -2155,7 +2575,7 @@ async function main() {
               try { p = coll.get(i); } catch { continue; }
               if (!p) continue;
               if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-              if (p.modelMatrix && typeof p.ready !== 'undefined' && p.id === id) found = p;
+              if (p.modelMatrix && typeof p.ready !== 'undefined' && window.__qaModelIcao(p) === id) found = p;
             }
           };
           walk(v.scene.primitives);
@@ -2184,19 +2604,7 @@ async function main() {
         const g3dState = await evalPage(() => {
           const v = window.__godsEyeView.viewer;
           const findBB = (id) => {
-            let found = null;
-            const walk = (coll) => {
-              const n = coll.length;
-              for (let i = 0; i < n; i++) {
-                let p;
-                try { p = coll.get(i); } catch { continue; }
-                if (!p) continue;
-                if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-                if (p.image !== undefined && p.alignedAxis !== undefined && p.id === id) found = p;
-              }
-            };
-            walk(v.scene.primitives);
-            return found;
+            return window.__qaFindIcon(id);
           };
           const modelRadius = (id) => {
             const m = window.__g3dFindModel(id);
@@ -2208,6 +2616,7 @@ async function main() {
             flBBShown: findBB('aaa077')?.show ?? null,
             milBBShown: findBB('bbb177')?.show ?? null,
             sampleCalls: window.__g3dSampleCalls,
+            sampleHits: { ...window.__g3dSampleHits },
           };
         });
         // Expected radial delta = (stub + offset) − billboard's rendered altitude.
@@ -2223,15 +2632,20 @@ async function main() {
         const flDelta = g3dState.flModelRadius - g3dIngest.flBBRadius;
         const milDelta = g3dState.milModelRadius - g3dIngest.milBBRadius;
         const HEIGHT_TOL_M = 1.0;
-        record(`ground-3d: flights model height = sampled skin + belly offset (${g3dFlKlass})`,
+        record(`ground-3d: flights model height = sampled skin + belly offset (default airliner)`,
           Math.abs(flDelta - flWantDelta) <= HEIGHT_TOL_M,
           `Δradial=${flDelta.toFixed(2)} m want=${flWantDelta.toFixed(2)} m (stub ${GROUND3D_STUB_H} + offset ${g3dFlOffset.toFixed(2)} − alt ${(150 + g3dFlGeoidN).toFixed(2)} [150 baro + ${g3dFlGeoidN.toFixed(2)} geoidN])`);
-        record(`ground-3d: military model height = sampled skin + belly offset (${g3dMilKlass})`,
+        record(`ground-3d: military model height = sampled skin + belly offset (C130)`,
           Math.abs(milDelta - milWantDelta) <= HEIGHT_TOL_M,
           `Δradial=${milDelta.toFixed(2)} m want=${milWantDelta.toFixed(2)} m (stub ${GROUND3D_STUB_H} + offset ${g3dMilOffset.toFixed(2)} − alt 0)`);
         record('ground-3d: billboard→model handoff holds on the ground (icons hidden once models render)',
           g3dState.flBBShown === false && g3dState.milBBShown === false,
           `fl bb.show=${g3dState.flBBShown} mil bb.show=${g3dState.milBBShown}`);
+        const bothGroundContactsSampled = g3dState.sampleHits?.flights > 0
+          && g3dState.sampleHits?.military > 0;
+        record('ground-3d: both grounded synthetic contacts reached the sampling seam',
+          bothGroundContactsSampled,
+          `sample hits near distinct fixture cells: flights=${g3dState.sampleHits?.flights ?? 0}, military=${g3dState.sampleHits?.military ?? 0}`);
 
         // ============================================================
         // WELD (2026-08-03): the detection anchor follows the RENDERED aircraft.
@@ -2319,55 +2733,49 @@ async function main() {
             `samples=${w.samples} missing=${w.missing} maxΔ=${w.maxDelta.toFixed(3)} m (tol ${WELD_TOL_M} m)`);
         }
 
-        // (e) one-shot: run ~1.2 s of frames — the count must not grow (a per-frame
-        // sampler would add dozens). TWO bounded one-shot sources (re-pinned
-        // 2 → 4 for the validated round-4 mesh-floor design, 2026-07-06):
-        // groundSnap's model snap (one per grounded plane) and the mesh-floor
-        // CELL probe (one per unique ~111 m cell; the two synthetic grounded
-        // planes occupy distinct cells). FLATNESS across frames is the
-        // load-bearing invariant — the absolute count just pins the fixtures.
+        // (e) one-shot: drive 60 verified render frames. Correct placement above
+        // proves the deterministic sample landed; the exact initial call total is
+        // NOT a contract. A successful ground snap publishes the validated height
+        // into the shared mesh-floor cell, so the later poll-time sampler may
+        // legitimately skip that cell. The load-bearing invariant is bounded
+        // growth across frames, with an explicit guard against a timed-out driver
+        // falsely looking flat.
         const callsBefore = g3dState.sampleCalls;
-        await page.evaluate(async (frames) => {
-          const v = window.__godsEyeView.viewer;
-          await new Promise((res) => {
-            let n = 0;
-            let settled = false;
-            const finish = () => {
-              if (settled) return;
-              settled = true;
-              clearTimeout(timer);
-              stop();
-              res();
-            };
-            const stop = v.scene.postRender.addEventListener(() => {
-              if (++n >= frames) {
-                finish();
-                return;
-              }
-              v.scene.requestRender();
-            });
-            const timer = setTimeout(finish, Math.max(15000, frames * 1500));
-            v.scene.requestRender();
-          });
-        }, 60);
-        await sleep(400);
+        const fleetSampleWindow = await sampleFrames(
+          page, 60, () => window.__g3dSampleCalls,
+        );
         const callsAfter = await evalPage(() => window.__g3dSampleCalls);
-        // Bounded-shape pin (round 5): with the boot-wide "no tiles" stub,
-        // every synthetic contact's cell is unlatched until this group's
-        // 187.5 stub lands, so the absolute count varies with how many
-        // synthetics earlier groups left alive. The INVARIANT is that
-        // sampling is per-poll-bounded and one-shot per cell — a per-frame
-        // sampler would add ~60+ over the frame loop; a mid-window poll
-        // legitimately adds a few cells for moving contacts.
-        record('ground-3d: ground snap + mesh-floor probes are one-shot/per-poll bounded (no per-frame sampling)',
-          callsBefore >= 4 && (callsAfter - callsBefore) <= 8,
-          `sampleHeight calls: after models up=${callsBefore} (≥4: snap + mesh cell per grounded plane), growth over ~60 frames=${callsAfter - callsBefore} (per-frame would be ~60+)`);
+        const fleetFramesComplete = !fleetSampleWindow.timedOut
+          && fleetSampleWindow.values.length === 60;
+        record('ground-3d: fleet sampling window completed all 60 requested frames',
+          fleetFramesComplete,
+          `frames=${fleetSampleWindow.values.length}/60 timedOut=${fleetSampleWindow.timedOut}`);
+        record('ground-3d: fleet ground sampling is one-shot/per-poll bounded (no per-frame sampling)',
+          fleetFramesComplete && bothGroundContactsSampled && (callsAfter - callsBefore) <= 8,
+          `sampleHeight calls: before=${callsBefore}, growth over 60 verified frames=${callsAfter - callsBefore} (per-frame would be ~60+)`);
 
         // (d) TRACKED grounded plane → the standalone tracked model (the owner's
         // "tracked SWA143 at 0 kts stayed a 2D cyan billboard" case).
+        // Start the counter BEFORE ownership changes. The previous guard began
+        // only after ready+shown and could miss a regression that sampled every
+        // render frame while the standalone model was loading.
+        const trackedTransitionCallsBefore = callsAfter;
         await evalPage(() => {
           window.__godsEyeView.dataManager.layers.get('flights').module.trackById('aaa077');
         });
+        const trackedTransitionWindow = await sampleFrames(
+          page, 30, () => window.__g3dSampleCalls,
+        );
+        const trackedTransitionCallsAfter = await evalPage(() => window.__g3dSampleCalls);
+        const trackedTransitionFramesComplete = !trackedTransitionWindow.timedOut
+          && trackedTransitionWindow.values.length === 30;
+        record('ground-3d: tracked loading/ownership sampling window completed all 30 requested frames',
+          trackedTransitionFramesComplete,
+          `frames=${trackedTransitionWindow.values.length}/30 timedOut=${trackedTransitionWindow.timedOut}`);
+        record('ground-3d: tracked loading/ownership ground sampling is bounded (no per-frame sampling)',
+          trackedTransitionFramesComplete
+            && (trackedTransitionCallsAfter - trackedTransitionCallsBefore) <= 8,
+          `sampleHeight growth from before trackById across 30 verified frames=${trackedTransitionCallsAfter - trackedTransitionCallsBefore} (per-frame would be ~30+)`);
         const g3dTrackedUp = await page.waitForFunction(() => {
           const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
           const ti = fl.getTrackedInfo();
@@ -2389,8 +2797,30 @@ async function main() {
         record('ground-3d: TRACKED grounded plane gets the standalone tracked model, ground-snapped',
           g3dTrackedUp && trackedHeightOk, trackedDetail);
 
+        if (g3dTrackedUp) {
+          const trackedReadyCallsBefore = await evalPage(() => window.__g3dSampleCalls);
+          const trackedReadyWindow = await sampleFrames(
+            page, 30, () => window.__g3dSampleCalls,
+          );
+          const trackedReadyCallsAfter = await evalPage(() => window.__g3dSampleCalls);
+          const trackedReadyFramesComplete = !trackedReadyWindow.timedOut
+            && trackedReadyWindow.values.length === 30;
+          record('ground-3d: tracked ready-state sampling window completed all 30 requested frames',
+            trackedReadyFramesComplete,
+            `frames=${trackedReadyWindow.values.length}/30 timedOut=${trackedReadyWindow.timedOut}`);
+          record('ground-3d: tracked ready-state ground sampling is bounded (no per-frame sampling)',
+            trackedReadyFramesComplete
+              && (trackedReadyCallsAfter - trackedReadyCallsBefore) <= 8,
+            `sampleHeight growth over 30 verified ready-state frames=${trackedReadyCallsAfter - trackedReadyCallsBefore} (per-frame would be ~30+)`);
+        } else {
+          record('ground-3d: tracked ready-state sampling window completed all 30 requested frames',
+            false, 'tracked model never became ready+shown');
+          record('ground-3d: tracked ready-state ground sampling is bounded (no per-frame sampling)',
+            false, 'tracked model never became ready+shown');
+        }
+
         // WELD (tracked): the tracked CARD anchors to the model you can see.
-        // `gevVisualPosition` is a SEPARATE accessor from `gevDisplayPosition` on
+        // the record's `visualPosition` is a SEPARATE accessor from its `displayPosition` on
         // purpose — the latter carries the follow-camera anti-jitter contract and
         // must keep returning the cached dead-reckoned value the camera settled
         // on. So this asserts both halves: the visual accessor is welded to the
@@ -2398,14 +2828,14 @@ async function main() {
         // dead-reckoned position rather than having been quietly repurposed.
         if (g3dTrackedUp) {
           const trackedWeld = await evalPage(() => {
-            const ent = window.__godsEyeView.viewer.trackedEntity;
+            const ent = window.__qaFollowed();
             const m = window.__g3dFindModel('aaa077');
             if (!m) return { error: 'no tracked model' };
             const matrix = m.modelMatrix;
             const scale = Number.isFinite(m.computedScale)
               ? m.computedScale
               : (Number.isFinite(m.scale) ? m.scale : 1);
-            // airplane.glb is now bounding-box centred with transforms applied.
+            // Fleet models are drawn about their origin, transforms applied.
             const x = 0 * scale;
             const y = 0 * scale;
             const z = 0 * scale;
@@ -2417,10 +2847,10 @@ async function main() {
             const at = (p) => (p ? Math.hypot(
               p.x - anchor.x, p.y - anchor.y, p.z - anchor.z,
             ) : null);
-            const visual = typeof ent?.gevVisualPosition === 'function' ? ent.gevVisualPosition() : null;
-            const display = typeof ent?.gevDisplayPosition === 'function' ? ent.gevDisplayPosition() : null;
+            const visual = typeof ent?.visualPosition === 'function' ? ent?.visualPosition() : null;
+            const display = typeof ent?.displayPosition === 'function' ? ent?.displayPosition() : null;
             return {
-              hasVisualAccessor: typeof ent?.gevVisualPosition === 'function',
+              hasVisualAccessor: typeof ent?.visualPosition === 'function',
               visualDelta: at(visual),
               displayDelta: at(display),
             };
@@ -2436,34 +2866,110 @@ async function main() {
           // anti-jitter accessor has been repurposed and the follow camera is at
           // risk. Skipped (not failed) when the DR cache is momentarily invalid.
           const displayDelta = trackedWeld.displayDelta;
-          record('weld: gevDisplayPosition still reports the dead-reckoned position (anti-jitter intact)',
+          record('weld: the record displayPosition still reports the dead-reckoned position (anti-jitter intact)',
             !Number.isFinite(displayDelta) || displayDelta > ACCESSOR_SEPARATION_EPSILON_M,
             Number.isFinite(displayDelta)
               ? `displayΔ=${displayDelta.toFixed(3)} m (must stay > ${ACCESSOR_SEPARATION_EPSILON_M} m — the ground-snap split)`
               : 'display accessor returned null this frame (DR cache invalid) — separation not evaluated');
         }
       }
-
-      // Cleanup: untrack, restore sampleHeight, drop the grounded synthetics
-      // (grounded fast-cull removes them after ONE missed poll).
-      await evalPage(async () => {
-        const v = window.__godsEyeView.viewer;
-        const dm = window.__godsEyeView.dataManager;
+      }
+    } catch (error) {
+      // Contain the scenario so a primary fixture failure survives cleanup and
+      // later groups plus the run-wide report still execute.
+      g3dPrimaryFailure = error;
+    } finally {
+      // This group temporarily owns the sampling seam, model toggle, synthetics,
+      // tracking state, and page globals. Release every one on error/timeout as
+      // well as on the happy path so later height-datum scenarios cannot inherit
+      // a deterministic skin or a tracked model from this fixture.
+      if (g3dSetup) {
+        try {
+          const cleanupFailures = await evalPage(async (priorModels3d) => {
+        const gev = window.__godsEyeView;
+        const v = gev.viewer;
+        const dm = gev.dataManager;
         const fl = dm.layers.get('flights').module;
         const mil = dm.layers.get('military').module;
-        fl.stopTracking();
-        delete v.scene.sampleHeight; // restore the prototype implementation
-        window.__SYNTH.flights = window.__SYNTH.flights.filter((f) => f.icao !== 'aaa077');
-        window.__SYNTH.military = window.__SYNTH.military.filter((m) => m.hex !== 'bbb177');
-        await fl.update(v);
-        await mil.update(v);
-      });
+        const failures = [];
+        const attempt = async (label, operation) => {
+          try { await operation(); } catch (error) {
+            failures.push(`${label}: ${error?.message || error}`);
+          }
+        };
+        await attempt('stop tracking', () => fl.stopTracking());
+        await attempt('remove flights synthetic', () => {
+          window.__SYNTH.flights = window.__SYNTH.flights.filter((f) => f.icao !== 'aaa077');
+        });
+        await attempt('remove military synthetic', () => {
+          window.__SYNTH.military = window.__SYNTH.military.filter((m) => m.hex !== 'bbb177');
+        });
+        await attempt('refresh flights', () => fl.update(v));
+        await attempt('refresh military', () => mil.update(v));
+        await attempt('restore sampleHeight seam', () => {
+          v.scene.sampleHeight = window.__g3dPriorSampleHeight;
+        });
+        await attempt('restore tilesLoaded seam', () => {
+          if (!gev.tileset) return;
+          const prior = window.__g3dPriorTilesLoadedDescriptor;
+          if (prior) Object.defineProperty(gev.tileset, 'tilesLoaded', prior);
+          else delete gev.tileset.tilesLoaded;
+        });
+        await attempt('restore flights models3d', () => {
+          fl.setParams({ models3d: priorModels3d.flights });
+        });
+        await attempt('restore military models3d', () => {
+          mil.setParams({ models3d: priorModels3d.military });
+        });
+        await attempt('delete fixture globals', () => {
+          delete window.__g3dPriorSampleHeight;
+          delete window.__g3dPriorTilesLoadedDescriptor;
+          delete window.__g3dFindModel;
+          delete window.__g3dSampleCalls;
+          delete window.__g3dSampleHits;
+        });
+        return failures;
+          }, g3dSetup.priorModels3d);
+          if (cleanupFailures.length > 0) {
+            g3dCleanupFailure = new Error(`ground-3d cleanup failed: ${cleanupFailures.join(' | ')}`);
+          }
+        } catch (error) {
+          // A page-evaluation failure is itself cleanup evidence, but it must
+          // not replace the primary error or abort the remaining harness.
+          g3dCleanupFailure = error;
+        }
+      }
     }
+    record('ground-3d: scenario completed without an unhandled fixture error',
+      g3dPrimaryFailure === null,
+      g3dPrimaryFailure
+        ? `primary failure: ${g3dPrimaryFailure?.message || g3dPrimaryFailure}`
+        : 'primary path completed');
+    record('ground-3d: fixture cleanup completed without errors',
+      g3dCleanupFailure === null,
+      g3dCleanupFailure
+        ? `cleanup failure: ${g3dCleanupFailure?.message || g3dCleanupFailure}`
+        : (g3dSetup ? 'all owned fixture state released' : 'post-setup cleanup not required'));
 
     // ============================================================
     // CHANGE 4 (2026-07-03): arrival rotation freshness. Field test: "planes
     // look weird when you first come to them — rotations are weird". Two
     // repaired holes, both layers:
+    //
+    // SINCE THE GPU ICON SETS (2c4c66c71) there is no CPU rotation pass to
+    // tamper with or repair: each frame the shader turns every icon along the
+    // course its row's motion segment carries at that frame's time. The
+    // invariant — the nose is right on the first settled frame after a
+    // camera move and on the first frame a hidden contact is shown again —
+    // is now observed on the drawn rows: the on-screen nose the drawn course
+    // projects to, against the one the plane's feed course projects to, at
+    // the same position, on exactly those two frames (same 10° bound, same
+    // per-frame budgets). That the shader turns an icon to the screen angle
+    // its course projects to is the renderer's own contract, which the
+    // renderer conformance reference scenes draw (course-rotated arrows,
+    // top and tilted views); a CPU readback cannot see the GPU's rotation. The reveal hides and re-shows the row through the
+    // layer's own icon book, the only thing that hides a fleet icon.
+    // The two holes the passes repaired, for the record:
     //   (a) SETTLE PASS — camera.moveEnd forces a full rotation pass on the
     //       next frame (the pose-signature gate can eat a fly-to's settle:
     //       the final easing frames land inside one 10 m/0.06° quantization
@@ -2472,35 +2978,25 @@ async function main() {
     //       idles gets its rotation refreshed the same tick (it used to
     //       reappear wearing its stale/creation-north nose for up to 1 s).
     // Staged deterministically: park the camera nadir over the synthetic
-    // cluster, let rotations settle, TAMPER a billboard's rotation, then
-    // trigger each path with the camera idle. The idle-drift catch-up
-    // (ROTATION_REFRESH_MS = 1 s) can coincidentally mask a regression in a
-    // ~300 ms SwiftShader frame window, so a regression shows as an
-    // intermittent (not guaranteed) failure — never a false failure.
+    // cluster, let it settle, then trigger each path with the camera idle.
+    // Observe the first completed settle frame within 500 ms of forcing
+    // moveEnd and the first reveal frame within 500 ms of that settle frame
+    // (the budgets once sat inside the 1 s idle rotation refresh; they are
+    // kept as they were).
     // ============================================================
-    console.log('\nChange 4 — arrival rotation: moveEnd settle pass + horizon-reveal pass');
+    console.log('\nChange 4 — arrival rotation: the drawn nose on the settle frame and the first reveal');
     const arrival = await evalPage(async () => {
       const v = window.__godsEyeView.viewer;
       const dm = window.__godsEyeView.dataManager;
-      // 3D models OFF for this phase: a model-handed-off billboard is hidden
-      // and skips rotation updates entirely — the probes need live billboards
-      // (this is also the app's default state the field report came from).
+      const { screenProjectedRotation } = await import(`${window.__gevQaSourceBase || '/src'}/render/cesium/iconOrientation.js`);
+      const { observeArrivalRotationWithRetry } = await import(`${window.__gevQaSourceBase || '/src'}/tooling/trackArrivalObservation.mjs`);
+      // 3D models OFF for this phase: a model-handed-off icon is hidden, and
+      // the probes need shown icons (this is also the app's default state the
+      // field report came from).
       dm.layers.get('flights').module.setParams({ models3d: false });
       dm.layers.get('military').module.setParams({ models3d: false });
       const findBB = (id) => {
-        let found = null;
-        const walk = (coll) => {
-          const n = coll.length;
-          for (let i = 0; i < n; i++) {
-            let p;
-            try { p = coll.get(i); } catch { continue; }
-            if (!p) continue;
-            if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-            if (p.image !== undefined && p.alignedAxis !== undefined && p.id === id) found = p;
-          }
-        };
-        walk(v.scene.primitives);
-        return found;
+        return window.__qaFindIcon(id);
       };
       const nextFrames = (n) => new Promise((res) => {
         let count = 0;
@@ -2524,8 +3020,8 @@ async function main() {
       });
       // Park the camera straight above the flights cluster (lift a live
       // billboard's position radially — no Cesium global needed in-page) so
-      // every probe plane projects on-screen, then let rotations settle at
-      // the new pose (the setView pose change forces a pass on the next tick).
+      // every probe plane projects on-screen, then let a few frames draw at
+      // the new pose.
       // aaa002 — aaa001 was evicted for good by the M3 age-out phase.
       const anchor = findBB('aaa002');
       if (!anchor) return { error: 'anchor aaa002 missing' };
@@ -2539,55 +3035,100 @@ async function main() {
       });
       await nextFrames(3);
       const angDiff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
-      const probe = async (id) => {
+      const probe = async (layer, id, course) => {
         const bb = findBB(id);
         if (!bb || !bb.show) return { error: `${id} missing/hidden` };
-        const r0 = bb.rotation; // settled reference (camera idle; DR drift is sub-degree over the probe)
-        // (a) settle pass: tamper, then raise moveEnd with the camera IDLE —
-        // the pose signature is unchanged, so only the moveEnd hook can fix
-        // this before the 1 s catch-up.
-        bb.rotation = r0 + 1.5;
-        v.camera.moveEnd.raiseEvent();
-        await nextFrames(2);
-        const afterMoveEnd = bb.rotation;
-        // (b) reveal pass: tamper + hide — the next fleet tick must flip it
-        // visible AND correct the nose in that same tick (camera still idle,
-        // no moveEnd raised). Diagnostic fields (round 5): record WHICH frame
-        // the flip landed on (flipFrame; -1 = never within the extended
-        // window) and whether a 3D model owns this id — distinguishes "tick
-        // slow under load" from "occluder says hidden" from "model handoff".
-        bb.rotation = r0 + 1.5;
-        bb.show = false;
-        let flipFrame = -1;
-        for (let f = 1; f <= 6; f++) {
-          await nextFrames(1);
-          if (bb.show && flipFrame === -1) flipFrame = f;
-          if (f >= 2 && flipFrame !== -1) break;
+        if (!Number.isFinite(bb.course) && !Number.isFinite(bb.rotation)) {
+          return { error: `${id} has no drawn course or rotation` };
         }
-        const hasModel = !!(window.__g3dFindModel && window.__g3dFindModel(id));
-        return {
-          r0, dMoveEnd: angDiff(afterMoveEnd, r0), dReveal: angDiff(bb.rotation, r0),
-          shown: bb.show, flipFrame, hasModel,
+        const setIconShown = layer.testing?._setIconForTest;
+        if (typeof setIconShown !== 'function') return { error: `${id}: the layer has no icon test seam` };
+        // The on-screen nose the drawn row shows now, against the feed's.
+        const drawnError = () => {
+          const now = findBB(id);
+          if (!now) return { shown: false, rotationError: NaN };
+          // A GPU row is turned along its drawn course, or drawn upright; a
+          // billboard carries its screen rotation itself.
+          const drawn = Number.isFinite(now.course)
+            ? (now.rotates ? screenProjectedRotation(v.scene, now.position, now.course, null) : 0)
+            : now.rotation;
+          return {
+            shown: !!now.show,
+            rotationError: angDiff(drawn, screenProjectedRotation(v.scene, now.position, course, null)),
+          };
         };
+        const hasModel = !!(window.__g3dFindModel && window.__g3dFindModel(id));
+        // The settle/reveal budgets and the retry were written for the removed
+        // CPU passes (a frame late enough for the 1 s idle refresh to repair
+        // it was inconclusive); they are kept unchanged as a guard. A
+        // wall-clock timeout gets one more attempt; one that measured a wrong
+        // angle — a wrong first reveal, or a wrong settle frame before a
+        // reveal timeout — never does.
+        //
+        // The reveal: the row is hidden right after the settle frame, frames
+        // must actually draw it hidden, and only then is it shown again, so
+        // the frame measured is the first one that draws it after a hidden
+        // frame. It stays hidden for two drawn frames, past the frame that
+        // follows the settle frame, so the reveal is timed on an ordinary
+        // frame rather than on whether that one was pipelined; each hidden
+        // frame restarts the reveal's clock, and the setup is `hiddenMs`.
+        const REVEAL_HIDDEN_FRAMES = 2;
+        let revealArmed = false;
+        let hiddenFrames = 0;
+        const observed = await observeArrivalRotationWithRetry({
+          async prepare() {
+            // One settled camera move and a frame before each attempt, as the
+            // passes once needed (the layers' moveEnd now runs their fleet
+            // pass on the next frame).
+            revealArmed = false;
+            hiddenFrames = 0;
+            v.camera.moveEnd.raiseEvent();
+            await nextFrames(1);
+          },
+          scene: v.scene,
+          startMoveEnd() {
+            v.camera.moveEnd.raiseEvent();
+          },
+          startReveal() {
+            // Hide immediately after the confirmed settle frame, through the
+            // layer's icon book (written to the draw set as this task ends).
+            setIconShown(id, { shown: false });
+            revealArmed = true;
+          },
+          read() {
+            const sample = drawnError();
+            // A frame drew it hidden: after the last one, show it again for
+            // the next frame; the reveal is measured from here.
+            if (revealArmed && sample.shown === false) {
+              hiddenFrames += 1;
+              if (hiddenFrames >= REVEAL_HIDDEN_FRAMES) {
+                revealArmed = false;
+                setIconShown(id, { shown: true });
+              }
+              return { ...sample, revealStartsNow: true };
+            }
+            return sample;
+          },
+        });
+        // A reveal is only one after a frame drew the row hidden.
+        if (!observed.error && hiddenFrames === 0) {
+          return { ...observed, error: 'no frame drew the row hidden before its reveal', hasModel };
+        }
+        return { ...observed, hiddenFrames, hasModel };
       };
-      return { flights: await probe('aaa002'), military: await probe('bbb101') };
+      const flightCourse = window.__SYNTH.flights.find((f) => f.icao === 'aaa002')?.track ?? 0;
+      const militaryCourse = window.__SYNTH.military.find((m) => m.hex === 'bbb101')?.track ?? 0;
+      return {
+        flights: await probe(dm.layers.get('flights').module, 'aaa002', flightCourse),
+        military: await probe(dm.layers.get('military').module, 'bbb101', militaryCourse),
+      };
     });
-    const fmtArr = (a) => (!a ? `no result (${arrival?.error || 'phase error'})` : a.error ? a.error
-      : `settle-err=${(a.dMoveEnd * 180 / Math.PI).toFixed(1)}° reveal-err=${(a.dReveal * 180 / Math.PI).toFixed(1)}° shown=${a.shown} flipFrame=${a.flipFrame} hasModel=${a.hasModel}`);
-    const TAMPER_DEG = 1.5 * 180 / Math.PI; // ≈ 86° — an uncorrected nose stays this far off
-    // Reveal budget re-pinned 2 → 4 frames (round 5): the diagnostic probe
-    // shows the military flip consistently lands on frame 2 — the exact edge
-    // of the old budget — so any load hiccup flaked it (flights lands frame
-    // 1). The regression this protects against is a reveal that waits for
-    // the 1 s idle catch-up (~30-60 frames) or never re-aims; 4 frames still
-    // catches that with a wide margin, with zero-headroom flakes gone.
-    const arrOk = (a) => !!a && !a.error && a.shown
-      && (a.flipFrame === -1 ? false : a.flipFrame <= 4)
-      && a.dMoveEnd * 180 / Math.PI < 10 && a.dReveal * 180 / Math.PI < 10;
-    record(`arrival: moveEnd + reveal both re-aim within 4 frames, flights (tamper was ${TAMPER_DEG.toFixed(0)}°)`,
-      arrOk(arrival.flights), fmtArr(arrival.flights));
-    record(`arrival: moveEnd + reveal both re-aim within 4 frames, military (tamper was ${TAMPER_DEG.toFixed(0)}°)`,
-      arrOk(arrival.military), fmtArr(arrival.military));
+    const fmtArr = (a) => (!a ? `no result (${arrival?.error || 'phase error'})` : a.error ? `${a.error}; ${arrivalAngleViolated(a) ? 'angle violation (not retried); ' : ''}${Number.isFinite(a.dMoveEnd) ? `settle-err=${(a.dMoveEnd * 180 / Math.PI).toFixed(1)}° ` : ''}${Number.isFinite(a.dReveal) ? `reveal-err=${(a.dReveal * 180 / Math.PI).toFixed(1)}° ` : ''}elapsed=${Number(a.elapsedMs).toFixed(1)} ms attempts=${a.attempts}`
+      : `settle-err=${(a.dMoveEnd * 180 / Math.PI).toFixed(1)}° reveal-err=${(a.dReveal * 180 / Math.PI).toFixed(1)}° shown=${a.shown} flipFrame=${a.flipFrame} settle=${a.moveEndMs.toFixed(1)} ms reveal=${a.revealMs.toFixed(1)} ms hidden=${a.hiddenMs.toFixed(1)} ms total=${a.elapsedMs.toFixed(1)} ms attempts=${a.attempts} hasModel=${a.hasModel}`);
+    record('arrival: the drawn nose is right on the settle frame and the first reveal, flights',
+      arrivalRotationPassed(arrival.flights), fmtArr(arrival.flights));
+    record('arrival: the drawn nose is right on the settle frame and the first reveal, military',
+      arrivalRotationPassed(arrival.military), fmtArr(arrival.military));
 
     // ============================================================
     // DISPLAY FLOOR (2026-08-19): a grounded contact must never render below
@@ -2613,8 +3154,9 @@ async function main() {
 
     const dfSetup = await evalPage(async () => {
       const Cesium = await import('/node_modules/cesium/Build/Cesium/index.js');
-      const v = window.__godsEyeView.viewer;
-      const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
+      const gev = window.__godsEyeView;
+      const v = gev.viewer;
+      const fl = gev.dataManager.layers.get('flights').module;
       // Hermetic: the ground-3d group's cleanup restored the REAL sampleHeight,
       // which would let the mesh sampler latch whatever headless GL streams.
       //
@@ -2627,21 +3169,26 @@ async function main() {
       // need, and the COLD case in its own right); a number opens a
       // DETERMINISTIC skin for the scenarios that need a model to draw.
       window.__dfSkinM = null;
-      v.scene.sampleHeight = () => (window.__dfSkinM == null ? undefined : window.__dfSkinM);
+      window.__dfSkinSamples = [];
+      window.__dfPriorTilesLoadedDescriptor = gev.tileset
+        ? Object.getOwnPropertyDescriptor(gev.tileset, 'tilesLoaded')
+        : null;
+      if (gev.tileset) {
+        Object.defineProperty(gev.tileset, 'tilesLoaded', { value: true, configurable: true });
+      }
+      v.scene.sampleHeight = (cartographic) => {
+        if (window.__dfSkinM == null) return undefined;
+        const lat = Cesium.Math.toDegrees(Number(cartographic?.latitude));
+        const lon = Cesium.Math.toDegrees(Number(cartographic?.longitude));
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          window.__dfSkinSamples.push({ lat, lon, h: window.__dfSkinM });
+          if (window.__dfSkinSamples.length > 512) window.__dfSkinSamples.shift();
+        }
+        return window.__dfSkinM;
+      };
       fl.setParams({ models3d: false }); // billboards own the visual (T7 gate open)
       window.__dfFindBB = (id) => {
-        let found = null;
-        const walk = (coll) => {
-          const n = coll.length;
-          for (let i = 0; i < n; i++) {
-            let p; try { p = coll.get(i); } catch { continue; }
-            if (!p) continue;
-            if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-            if (p.image !== undefined && p.alignedAxis !== undefined && p.id === id) found = p;
-          }
-        };
-        walk(v.scene.primitives);
-        return found;
+        return window.__qaFindIcon(id);
       };
       window.__dfCarto = (pos) => {
         const c = Cesium.Cartographic.fromCartesian(pos, Cesium.Ellipsoid.WGS84);
@@ -2654,6 +3201,55 @@ async function main() {
         tick();
         setTimeout(() => { done = true; res(); }, ms);
       });
+      // A timer can expire while the camera is new but the model/cache still
+      // belongs to the old frame. Observe the first completed exit frame,
+      // including a wrong result; never wait for visibility or height to pass.
+      window.__dfObserveTrackedExit = async ({ scene, trackedEntity, trackedModel,
+        getTrackedModel, getTrackedEntity, getTrackedId, getCameraHeight,
+        exitHeight, read, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) => {
+        const deadline = now() + 5000;
+        let removePre, removePost, removeError, timer;
+        let preFrame = null;
+        try {
+          return await new Promise((resolve) => {
+            let finished = false;
+            const finish = (result) => { if (!finished) { finished = true; resolve(result); } };
+            const valid = () => {
+              try {
+                if (now() > deadline) return 'tracked exit observation exceeded its 5000 ms deadline';
+                if (getTrackedEntity() !== trackedEntity || getTrackedId() !== 'aaa097') return 'tracked exit fixture identity changed';
+                if (!trackedModel || getTrackedModel() !== trackedModel) return 'tracked exit model identity changed';
+                if (!(getCameraHeight() > exitHeight)) return 'tracked exit camera left the exit regime';
+                return null;
+              } catch { return 'tracked exit fixture validation failed'; }
+            };
+            removePre = scene.preUpdate.addEventListener(() => {
+              if (finished) return;
+              const error = valid();
+              if (error) { finish({ error }); return; }
+              if (preFrame == null) preFrame = scene.frameState.frameNumber;
+            });
+            removePost = scene.postRender.addEventListener(() => {
+              if (finished || preFrame == null) return;
+              const error = valid();
+              if (error) { finish({ error }); return; }
+              if (scene.frameState.frameNumber === preFrame) {
+                finish({ error: 'tracked exit observation has no new rendered frame' }); return;
+              }
+              try {
+                const snapshot = read();
+                finish(snapshot ? { ...snapshot, observationFrame: scene.frameState.frameNumber }
+                  : { error: 'tracked exit snapshot missing' });
+              } catch { finish({ error: 'tracked exit snapshot failed' }); }
+            });
+            removeError = scene.renderError.addEventListener(() => finish({ error: 'tracked exit render failed' }));
+            timer = setTimer(() => finish({ error: 'tracked exit update did not complete within 5000 ms' }), 5000);
+            scene.requestRender();
+          });
+        } finally {
+          clearTimer(timer); removePre?.(); removePost?.(); removeError?.();
+        }
+      };
       // Cesium Models in the scene, split by visibility (duck-typed the same
       // way the harness excludes them from height probes).
       //
@@ -2678,7 +3274,7 @@ async function main() {
             if (!p) continue;
             if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
             if (p.activeAnimations !== undefined && p.minimumPixelSize !== undefined) {
-              if (icao !== undefined && p.id !== icao) continue;
+              if (icao !== undefined && window.__qaModelIcao(p) !== icao) continue;
               if (p.show) {
                 shown += 1;
                 if (p.ready === true) rendering += 1;
@@ -2703,7 +3299,7 @@ async function main() {
             if (!p) continue;
             if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
             if (p.activeAnimations !== undefined && p.minimumPixelSize !== undefined
-              && p.id === icao && p.modelMatrix) {
+              && window.__qaModelIcao(p) === icao && p.modelMatrix) {
               const m = p.modelMatrix;
               // Cesium's default is the IDENTITY matrix — translation (0,0,0),
               // the Earth's centre, which `Cartographic.fromCartesian` refuses.
@@ -2721,23 +3317,18 @@ async function main() {
         walk(v.scene.primitives);
         return h;
       };
-      // Tracked-contact model regime (2026-08-20). The tracked contact's model
-      // is NOT governed by the DISPLAY-rail 3D toggle — that toggle owns the
-      // FLEET's draw-call budget. The tracked model is default-on and driven by
-      // camera distance, entering below TRACKED_MODEL_ENTER_ALT_M and handing
-      // back to the billboard only above TRACKED_MODEL_EXIT_ALT_M (the
-      // anti-flap band). The CAMERA is therefore what decides whether a model
-      // or a billboard is the visual for a tracked contact, which is exactly
-      // what the display floor stands aside for — so these pins drive the
-      // camera explicitly instead of the toggle.
+      // Tracked-contact model regime. The tracked contact draws as a model
+      // exactly when the fleet's rule would draw it so: 3D on, the camera
+      // below the fleet ceiling, and the contact inside the nearest-first
+      // add/keep band from the eye. These pins drive the camera across that
+      // band: a model inside the ADD radius, the billboard past the KEEP one.
       //
-      // Read the thresholds from the app's own policy module so a later retune
-      // of the swap distance moves these pins with it rather than stranding
-      // them on stale numbers.
-      const reg = await import('/src/data/trackedModelRegime.js');
+      // Read the radii from the app's own policy module so a retune moves
+      // these pins with it rather than stranding them on stale numbers.
+      const reg = await import(`${window.__gevQaSourceBase || '/src'}/layers/flights/policy.js`);
       window.__dfRegime = {
-        enter: reg.TRACKED_MODEL_ENTER_ALT_M,
-        exit: reg.TRACKED_MODEL_EXIT_ALT_M,
+        enter: reg.MODEL_ADD_M,
+        exit: reg.MODEL_KEEP_M,
       };
       // Zooming while following is safe: the tracked-camera framer positions
       // the camera ONCE per selection and is deliberately read-only on normal
@@ -2780,17 +3371,12 @@ async function main() {
         }
         return window.__dfCountModels(icao);
       };
-      // Vite serves an edited source file as `…/groundFloor.js?t=<hmr stamp>`;
-      // importing the PLAIN path then hands back a second, unrelated module
-      // instance whose cells the app never reads. Offer the URL the app itself
-      // loaded first, then the plain path (clean, never-hot-reloaded server).
-      const seen = performance.getEntriesByType('resource')
-        .map((e) => e.name)
-        .filter((n) => /\/src\/data\/groundFloor\.js(\?|$)/.test(n));
-      window.__dfCandidates = [...new Set([...seen.reverse(), '/src/data/groundFloor.js'])];
+      // Read the application's surface owner, then prove it is the one
+      // used by the actual poll/render path with the unchanged floor seed.
+      window.__dfCandidates = window.__godsEyeView.surfaceServices?.groundFloor ? ['application surface'] : [];
       return { candidates: window.__dfCandidates.length };
     });
-    record('display-floor: groundFloor module URL candidates found', dfSetup.candidates > 0,
+    record('display-floor: ground-floor service owner found', dfSetup.candidates > 0,
       JSON.stringify(dfSetup));
 
     // Identity probe. Seed a contact's FIX cell BEFORE its first fix arrives,
@@ -2806,8 +3392,7 @@ async function main() {
       const tried = [];
       for (let i = 0; i < window.__dfCandidates.length; i++) {
         const url = window.__dfCandidates[i];
-        let gf;
-        try { gf = await import(/* @vite-ignore */ url); } catch { tried.push({ url, h: null }); continue; }
+        const gf = window.__godsEyeView.surfaceServices.groundFloor;
         if (typeof gf.reportMeshFloorCell !== 'function') { tried.push({ url, h: null }); continue; }
         gf.setMeshFloorPreferred(true);
         gf._clearMeshFloorCellsForTest();
@@ -3000,26 +3585,25 @@ async function main() {
           await fl.update(v);
           await window.__dfSettle(600);
         }
-        // The production clamp deliberately keeps a sticky floor cell across
-        // the first 15% of a boundary crossing. A newly warmed adjacent cell
-        // can therefore become readable a frame before the moving sprite is
-        // far enough into it to adopt it. Wait for the observable clamp, as the
-        // seeded-floor case above does, instead of sampling that valid
-        // hysteresis window as a product failure.
-        const clampDeadline = Date.now() + 5000;
-        let bb1 = null;
+        // The floor owner intentionally retains the previous cell near an
+        // edge. Sample inside a cell, beyond that hysteresis band, so the raw
+        // coordinate's floor is unambiguously the floor the sprite must use.
+        // Wait for geometry, not a passing height; a missing clamp still fails.
+        const interiorLimit = 0.0005 - gf.CELL_HYSTERESIS_DEG - 0.00002;
+        const sampleDeadline = Date.now() + 8000;
         let d1 = null;
-        let spriteFloor = null;
+        let sampleInterior = false;
         do {
           await window.__dfSettle(250);
-          bb1 = window.__dfFindBB('aaa097');
+          const bb1 = window.__dfFindBB('aaa097');
           d1 = bb1 ? window.__dfCarto(bb1.position) : null;
-          spriteFloor = d1 ? gf.cachedGroundFloor(d1.lat, d1.lon) : null;
-        } while (Date.now() < clampDeadline
-          && (!Number.isFinite(d1?.h) || !Number.isFinite(spriteFloor)
-            || d1.h < spriteFloor + 1));
+          sampleInterior = !!d1
+            && Math.abs(d1.lat - cell(d1.lat)) < interiorLimit
+            && Math.abs(d1.lon - cell(d1.lon)) < interiorLimit;
+        } while (!sampleInterior && Date.now() < sampleDeadline);
         return {
           startCold,
+          sampleInterior,
           displayCell,
           fixCell,
           sameCellAsFix: displayCell.lat === fixCell.lat && displayCell.lon === fixCell.lon,
@@ -3028,7 +3612,7 @@ async function main() {
           aheadCell,
           aheadFloor: gf.cachedGroundFloor(aheadCell.lat, aheadCell.lon),
           spriteH: d1 ? d1.h : null,
-          spriteFloor,
+          spriteFloor: d1 ? gf.cachedGroundFloor(d1.lat, d1.lon) : null,
           beforeH: d0.h,
         };
       }, 30.3000, -97.8000);
@@ -3062,6 +3646,10 @@ async function main() {
         dfCorridor.controlFloor == null,
         `control cell floor = ${dfCorridor.controlFloor}`);
 
+      record('display-floor/corridor: the height sample clears cell-boundary hysteresis',
+        dfCorridor.sampleInterior === true,
+        'the sampled coordinate lies inside one unambiguous floor cell');
+
       record('display-floor/corridor: the sprite rides the corridor-warmed floor',
         Number.isFinite(dfCorridor.spriteH) && Number.isFinite(dfCorridor.spriteFloor)
           && dfCorridor.spriteH >= dfCorridor.spriteFloor + DISPLAY_FLOOR_LIFT_M - 0.5,
@@ -3081,12 +3669,34 @@ async function main() {
         const bbBefore = window.__dfFindBB('aaa097');
         if (!bbBefore) return { error: 'aaa097 billboard missing' };
         const d0 = window.__dfCarto(bbBefore.position);
-        // Plant a floor well ABOVE where it currently renders, across the block
-        // it can move within, so an UNFLOORED tracked entity is unmistakable.
-        const seeded = d0.h + 40;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            gf.reportMeshFloorCell(cell(d0.lat) + dy * 0.001, cell(d0.lon) + dx * 0.001, seeded);
+        // Plant above both the current billboard and this group's 400 m
+        // identity-probe floor. A poll can refresh the raw render altitude
+        // after d0 was read; a lower seed makes the negative model-ownership
+        // assertion impossible even when the clamp correctly stands aside.
+        const seeded = Math.max(d0.h, 400) + 40;
+        // The contact keeps taxiing while the regimes below are driven (the
+        // model wait alone can run to 20 s), so the planted floor reaches
+        // along its heading as well: the 3×3 cells around it, and the same
+        // three cells across the track every ~100 m for 600 m ahead. A
+        // contact that left a 3×3 patch was read over an unplanted cell,
+        // where a DEM floor that had already landed under its raw height
+        // decided the assertion instead of the regime.
+        const headingDeg = window.__SYNTH.flights.find((f) => f.icao === 'aaa097')?.track ?? 0;
+        const headingRad = headingDeg * Math.PI / 180;
+        const metresPerDegLat = 111320;
+        const metresPerDegLon = metresPerDegLat * Math.cos(d0.lat * Math.PI / 180);
+        const plantedCells = new Set();
+        for (let aheadM = 0; aheadM <= 600; aheadM += 100) {
+          const lat = d0.lat + (aheadM * Math.cos(headingRad)) / metresPerDegLat;
+          const lon = d0.lon + (aheadM * Math.sin(headingRad)) / metresPerDegLon;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const c = [cell(lat) + dy * 0.001, cell(lon) + dx * 0.001];
+              const key = `${c[0].toFixed(3)},${c[1].toFixed(3)}`;
+              if (plantedCells.has(key)) continue;
+              plantedCells.add(key);
+              gf.reportMeshFloorCell(c[0], c[1], seeded);
+            }
           }
         }
         const fleetClampDeadline = Date.now() + 5000;
@@ -3099,12 +3709,15 @@ async function main() {
         } while (Date.now() < fleetClampDeadline
           && (!Number.isFinite(fleetH) || fleetH < seeded + 1));
         if (!fl.trackById('aaa097')) return { error: 'trackById(aaa097) failed' };
+        // The tracked contact obeys the same 3D toggle as the fleet. Arm it
+        // before testing the cold-ground gate and the warm model handoff.
+        fl.setParams({ models3d: true });
         await window.__dfSettle(1500);
         // Read the tracked entity's rendered height plus the floor under it and
         // the sensor value the data APIs report, at whatever regime the camera
         // is currently in.
         const readTracked = () => {
-          const pos = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+          const pos = window.__qaFollowed()?.position?.();
           if (!pos) return null;
           const c = window.__dfCarto(pos);
           const info = fl.getTrackedInfo();
@@ -3173,10 +3786,31 @@ async function main() {
         // the billboard — which MUST be floored, or a tracked grounded contact
         // renders buried at any distance the operator pulls out to. This is the
         // coverage the toggle used to reach; the zoom regime reaches it now.
+        const findOwnModel = () => {
+          let found = null;
+          const walk = (collection) => {
+            for (let i = 0; i < collection.length; i++) {
+              const item = collection.get(i);
+              if (typeof item?.get === 'function' && typeof item.length === 'number') walk(item);
+              else if (window.__qaModelIcao(item) === 'aaa097' && item.activeAnimations !== undefined
+                && item.minimumPixelSize !== undefined) found = item;
+            }
+          };
+          walk(v.scene.primitives);
+          return found;
+        };
+        const trackedEntity = window.__qaFollowed();
+        const trackedModel = findOwnModel();
+        if (!trackedModel) return { error: 'tracked model absent before exit' };
         const achievedOut = await window.__dfZoomAbove(window.__dfRegime.exit + 5000);
-        await window.__dfSettle(1500);
-        const zoomedOut = readTracked();
-        if (!zoomedOut) return { error: 'tracked entity has no position (zoomed out)' };
+        const zoomedOut = await window.__dfObserveTrackedExit({
+          scene: v.scene, trackedEntity, trackedModel, getTrackedModel: findOwnModel,
+          getTrackedEntity: () => window.__qaFollowed(),
+          getTrackedId: () => fl.getTrackedInfo()?.icao24,
+          getCameraHeight: window.__dfCamH, exitHeight: window.__dfRegime.exit,
+          read: readTracked,
+        });
+        if (zoomedOut.error) return { error: zoomedOut.error };
 
         const out = {
           rawH: d0.h,
@@ -3257,8 +3891,8 @@ async function main() {
 
       // WARM ground, camera IN: the placement. The model is not merely visible,
       // it is standing ON the floor — within one class belly offset above it,
-      // never under it. MAX_BELLY_M clears the largest offset any class adds
-      // (widebody b789, 7.81 m in CLASS_MODEL_REAL); the floor itself is the
+      // never under it. MAX_BELLY_M clears the largest wheel clearance any
+      // fleet aircraft stands on at life size; the floor itself is the
       // hard lower bound, and a model placed at the raw feed altitude is ~240 m
       // under it.
       const MAX_BELLY_M = 12;
@@ -3306,10 +3940,8 @@ async function main() {
       // the tracked billboard becomes the visual again. Gating the clamp on
       // model EXISTENCE put the burial straight back in exactly that state.
       //
-      // This scenario also pins the toggle contract itself. The DISPLAY-rail
-      // "3D" toggle stays OFF for the whole block on purpose: it governs the
-      // FLEET's draw-call budget only, and the tracked contact must still take
-      // its model on zoom without the operator arming anything.
+      // The tracked contact obeys the shared 3D toggle. Keep it enabled
+      // while zoom alone hands the visual between model and billboard.
       const dfRetained = await evalPage(async () => {
         const v = window.__godsEyeView.viewer;
         const Cesium = await import('/node_modules/cesium/Build/Cesium/index.js');
@@ -3322,13 +3954,13 @@ async function main() {
         // and there would otherwise hand an open skin to the seeded scenarios
         // that follow; closing an already-closed skin is inert.
         try {
-        // Toggle OFF throughout — the tracked model must not need it.
-        fl.setParams({ models3d: false });
-        const toggleOff = fl.getParams().models3d === false;
+        // Arm the shared toggle so the zoom regime can retain a hidden model.
+        fl.setParams({ models3d: true });
+        const toggleOn = fl.getParams().models3d === true;
         if (!fl.trackById('aaa097')) return { error: 'trackById(aaa097) failed' };
         await window.__dfSettle(600);
         // Below the ENTER ceiling (trackById re-frames to the close follow
-        // range): the tracked model arrives on zoom alone, toggle still off.
+        // range): the tracked model arrives on zoom alone, 3D enabled.
         const belowH = await window.__dfZoomBelow(window.__dfRegime.enter - 20000);
         const withModel = await window.__dfAwaitTrackedModel('aaa097', 20000);
         // Same split as the regime scenario: a browser with no usable GLB
@@ -3339,7 +3971,7 @@ async function main() {
           return { skipped: 'no tracked model rendered in this browser' };
         }
         // While the model IS the visual the clamp must stand aside (T7).
-        const entWith = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+        const entWith = window.__qaFollowed()?.position?.();
         const withModelH = entWith ? window.__dfCarto(entWith).h : null;
         // Close the deterministic skin again for the rest of the group. The
         // model is up on a snap that is already cached, so it stays up until the
@@ -3354,7 +3986,7 @@ async function main() {
         // contact's primitive, and an unrelated model in the scene must not be
         // able to answer it either way.
         const afterOut = window.__dfCountModels('aaa097');
-        const ent = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+        const ent = window.__qaFollowed()?.position?.();
         const c = ent ? window.__dfCarto(ent) : null;
         // Plant a floor above wherever it now renders so "floored" is decisive.
         // Mesh cells latch ONE-SHOT, so the earlier scenario's seed would win
@@ -3375,10 +4007,10 @@ async function main() {
         // from mistaking a cached same-frame position for a failed clamp.
         v.scene.requestRender();
         await window.__dfSettle(900);
-        const ent2 = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+        const ent2 = window.__qaFollowed()?.position?.();
         const c2 = ent2 ? window.__dfCarto(ent2) : null;
         const out = {
-          toggleOff,
+          toggleOn,
           enter: window.__dfRegime.enter,
           exit: window.__dfRegime.exit,
           belowH,
@@ -3394,7 +4026,7 @@ async function main() {
         // Hand the camera back to the CLOSE follow range before releasing. The
         // LOADING scenario below needs BOTH an active tracked regime and a
         // fleet model for this contact, and the fleet only admits models within
-        // MODEL_PROX_ADD_M of the camera — parking just inside the enter
+        // MODEL_ADD_M of the camera — parking just inside the enter
         // ceiling satisfies the regime but sits outside that add radius, which
         // silently starved the fleet half into a skip.
         await window.__dfZoomBelow(belowH + 500);
@@ -3413,23 +4045,19 @@ async function main() {
         record('display-floor/T7: while the tracked MODEL is the visual, the clamp stands aside',
           !dfRetained.error && dfRetained.modelsRenderingBelow > 0,
           dfRetained.error
-            || `${dfRetained.modelsRenderingBelow} aaa097 model(s) rendering at ${(dfRetained.belowH / 1000).toFixed(0)} km with the 3D toggle OFF; entity at ${Number(dfRetained.withModelH).toFixed(1)} m (ground-snap owns it)`);
+            || `${dfRetained.modelsRenderingBelow} aaa097 model(s) rendering at ${(dfRetained.belowH / 1000).toFixed(0)} km with the 3D toggle ON; entity at ${Number(dfRetained.withModelH).toFixed(1)} m (ground-snap owns it)`);
 
-        // The toggle contract after auto-3D (2026-08-20): the DISPLAY-rail "3D"
-        // switch owns the FLEET only. The tracked contact's model is default-on
-        // and decided purely by camera distance, so with the toggle OFF it is
-        // SHOWN below the enter ceiling and handed back above the exit ceiling —
-        // and handed back by HIDING, not destroying, which is the retained state
-        // the floor pin below depends on.
-        record('display-floor/regime: the 3D toggle governs the FLEET only — the tracked model follows the zoom',
-          !dfRetained.error && dfRetained.toggleOff === true
+        // With 3D enabled, zooming out hides rather than destroys the
+        // tracked model: the retained state the floor check depends on.
+        record('display-floor/regime: with 3D enabled the tracked model follows the zoom',
+          !dfRetained.error && dfRetained.toggleOn === true
             && dfRetained.modelsRenderingBelow > 0
             && dfRetained.belowH < dfRetained.enter
             && dfRetained.shownModelsAbove === 0
             && dfRetained.hiddenModelsAbove > 0
             && dfRetained.aboveH > dfRetained.exit,
           dfRetained.error
-            || `toggle OFF throughout: at ${(dfRetained.belowH / 1000).toFixed(0)} km (< ${(dfRetained.enter / 1000).toFixed(0)} km enter) ${dfRetained.modelsRenderingBelow} aaa097 model(s) rendering; at ${(dfRetained.aboveH / 1000).toFixed(0)} km (> ${(dfRetained.exit / 1000).toFixed(1)} km exit) ${dfRetained.shownModelsAbove} shown / ${dfRetained.hiddenModelsAbove} retained-hidden`);
+            || `toggle ON throughout: at ${(dfRetained.belowH / 1000).toFixed(0)} km (< ${(dfRetained.enter / 1000).toFixed(0)} km enter) ${dfRetained.modelsRenderingBelow} aaa097 model(s) rendering; at ${(dfRetained.aboveH / 1000).toFixed(0)} km (> ${(dfRetained.exit / 1000).toFixed(1)} km exit) ${dfRetained.shownModelsAbove} shown / ${dfRetained.hiddenModelsAbove} retained-hidden`);
 
         record('display-floor: a retained-but-hidden tracked model does NOT suppress the floor',
           Number.isFinite(dfRetained.afterSeedH)
@@ -3438,11 +4066,10 @@ async function main() {
       }
 
       // ---- F3: the LOADING window is billboard-owned, not model-owned ------
-      // A fleet model is registered with Cesium's default show=true the instant
-      // its glTF resolves, but the handoff waits for `ready`; and a tracked
-      // model is null for the whole load even though the regime is already
-      // active. Both windows leave the BILLBOARD as the visual, so both must
-      // stay floored — ownership means actually rendering.
+      // Stress the fleet ownership predicate with synthetic show=true/ready=false
+      // flags. Production admission keeps the model hidden; these shadows do
+      // not simulate Cesium's internal loading/draw state. The tracked check
+      // below separately samples the no-rendering-model window.
       const dfLoading = await evalPage(async () => {
         const v = window.__godsEyeView.viewer;
         const Cesium = await import('/node_modules/cesium/Build/Cesium/index.js');
@@ -3458,13 +4085,8 @@ async function main() {
         };
         const out = {};
 
-        // (a) FLEET: reach the real admitted-but-not-ready window. A fleet model
-        // is registered in `_models` with Cesium's default show=true the moment
-        // its glTF resolves, while the billboard handoff waits for `ready` — so
-        // for a tick the model claims the visual it is not drawing. That window
-        // is ~one fleet tick wide, so hold the state open by shadowing the two
-        // flags on the instance (the same defineProperty trick the ground-3d
-        // group uses on `tilesLoaded`).
+        // (a) FLEET: retain the adversarial flags until this contact has passed
+        // through its installed fleet update and that frame has completed.
         const findFleetModel = (id) => {
           let found = null;
           const walk = (coll) => {
@@ -3473,7 +4095,7 @@ async function main() {
               let p; try { p = coll.get(i); } catch { continue; }
               if (!p) continue;
               if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-              if (p.activeAnimations !== undefined && p.minimumPixelSize !== undefined && p.id === id) found = p;
+              if (p.activeAnimations !== undefined && p.minimumPixelSize !== undefined && window.__qaModelIcao(p) === id) found = p;
             }
           };
           walk(v.scene.primitives);
@@ -3489,15 +4111,47 @@ async function main() {
           fl.setParams({ models3d: false });
           return { skipped: 'no fleet model for aaa097 in this browser' };
         }
+        // The layer decides who owns the visual from its OWN record of the
+        // model (data/modelRecord.js: `ready` from the draw set's ready event,
+        // `show` as it last sent it), not from the renderer's model object, so
+        // the shown-but-not-ready state is planted on that record. The record
+        // is the registered layer's own, reached through its test seam.
+        const fleetRecord = await fl.testing?._ensureFleetModelForTest?.('aaa097');
+        if (!fleetRecord || typeof fleetRecord !== 'object') {
+          fl.setParams({ models3d: false });
+          return { error: 'the flights layer has no model record for aaa097' };
+        }
         // Accessors with SWALLOWING setters, not data properties: the fleet tick
-        // assigns `model.show = false` for a not-ready model, and assigning to a
+        // assigns `show = false` for a not-ready model, and assigning to a
         // non-writable own property throws in strict mode — which lands inside
-        // Cesium's render loop and stops rendering for the rest of the run.
-        Object.defineProperty(fleetModel, 'ready', { get: () => false, set: () => {}, configurable: true });
-        Object.defineProperty(fleetModel, 'show', { get: () => true, set: () => {}, configurable: true });
+        // the render loop and stops rendering for the rest of the run.
+        const priorReady = Object.getOwnPropertyDescriptor(fleetRecord, 'ready');
+        const priorShow = Object.getOwnPropertyDescriptor(fleetRecord, 'show');
+        let armed = false;
+        let processedFrame = null;
+        let sample = null;
+        let sampledRecord = null;
+        let removePostRender = null;
+        try {
+        Object.defineProperty(fleetRecord, 'ready', { get: () => false, set: () => {}, configurable: true });
+        Object.defineProperty(fleetRecord, 'show', {
+          get: () => true,
+          set: (value) => {
+            // Both the not-ready handoff and horizon cull clear show AFTER
+            // computing this contact's display floor. Neither a timer nor an
+            // unrelated rendered frame proves that this aircraft was processed.
+            if (armed && value === false && processedFrame == null) {
+              processedFrame = v.scene.frameState.frameNumber;
+            }
+          },
+          configurable: true,
+        });
         const bb = window.__dfFindBB('aaa097');
         if (!bb) return { error: 'aaa097 billboard missing' };
-        bb.show = true; // the handoff would not have hidden it: the model is not ready
+        // (The icon is not forced shown here, as the old billboard fixture did:
+        // the renderer draws what the layer sends, so the handoff the record
+        // drives is the only thing that decides it.)
+        const sameIcon = (a, b) => !!a && !!b && (a === b || (a.setId === b.setId && a.id === b.id));
         const d0 = window.__dfCarto(bb.position);
         gf._clearMeshFloorCellsForTest();
         // Earlier display-floor scenarios deliberately leave this contact's
@@ -3508,21 +4162,53 @@ async function main() {
         fl._clearDisplayFloorStateForTest();
         const seededFleet = d0.h + 45;
         floorAround(d0, seededFleet);
-        // reportMeshFloorCell is a direct test seam and does not schedule a
-        // Cesium frame. Force the CallbackProperty to re-evaluate before the
-        // assertion, matching the request-render fix in the retained-model
-        // scenario above.
-        v.scene.requestRender();
-        await window.__dfSettle(900);
-        const bbAfter = window.__dfFindBB('aaa097');
-        out.fleetModelReady = fleetModel.ready;
-        out.fleetModelShow = fleetModel.show;
-        out.fleetBillboardVisible = !!bbAfter?.show;
-        out.fleetSeeded = seededFleet;
-        out.fleetH = bbAfter ? window.__dfCarto(bbAfter.position).h : null;
-        delete fleetModel.ready;
-        delete fleetModel.show;
-        fl.setParams({ models3d: false });
+        const tickDeadline = Date.now() + 5000;
+        removePostRender = v.scene.postRender.addEventListener(() => {
+          if (sample || processedFrame == null || v.scene.frameState.frameNumber < processedFrame) return;
+          if (Date.now() > tickDeadline) {
+            sample = { error: 'fleet loading fixture completed after its 5000 ms deadline' };
+            return;
+          }
+          const currentBb = window.__dfFindBB('aaa097');
+          const currentModel = findFleetModel('aaa097');
+          sample = {
+            fleetTickCompleted: true,
+            fleetFrame: v.scene.frameState.frameNumber,
+            fleetModelReady: fleetRecord.ready,
+            fleetModelShow: fleetRecord.show,
+            fleetBillboardVisible: !!currentBb?.show,
+            fleetSeeded: seededFleet,
+            fleetH: currentBb ? window.__dfCarto(currentBb.position).h : null,
+          };
+          // (An older build's seam answers asynchronously: its answer is
+          // checked once the frame is done, below.)
+          const currentRecord = fl.testing._ensureFleetModelForTest('aaa097');
+          if (typeof currentRecord?.then === 'function') sampledRecord = currentRecord;
+          else if (currentRecord !== fleetRecord) sample.error = 'fleet loading fixture changed before its completed frame';
+          if (!sameIcon(currentBb, bb) || currentModel !== fleetModel || fleetModel.isDestroyed()
+            || fl.getTrackedInfo()) sample.error = 'fleet loading fixture changed before its completed frame';
+        });
+        armed = true;
+        // This is a setup-completion deadline, not a visual latency budget.
+        // Take the FIRST completed fleet result, even when its height is wrong;
+        // never poll the height until the assertion happens to pass.
+        do {
+          await window.__dfSettle(50);
+        } while (!sample && Date.now() < tickDeadline);
+        if (!sample) return { error: 'fleet loading fixture did not complete an aircraft update within 5000 ms' };
+        if (sampledRecord && (await sampledRecord) !== fleetRecord) {
+          sample.error = 'fleet loading fixture changed before its completed frame';
+        }
+        Object.assign(out, sample);
+        } finally {
+          armed = false;
+          removePostRender?.();
+          if (priorReady) Object.defineProperty(fleetRecord, 'ready', priorReady);
+          else delete fleetRecord.ready;
+          if (priorShow) Object.defineProperty(fleetRecord, 'show', priorShow);
+          else delete fleetRecord.show;
+          fl.setParams({ models3d: false });
+        }
         await window.__dfSettle(400);
 
         // (b) TRACKED, regime ACTIVE but no model yet. Turning 3D on while
@@ -3531,7 +4217,7 @@ async function main() {
         // it finishes. Sample within that window.
         if (!fl.trackById('aaa097')) return { ...out, error: 'trackById(aaa097) failed' };
         await window.__dfSettle(500);
-        const entBefore = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+        const entBefore = window.__qaFollowed()?.position?.();
         const cBefore = entBefore ? window.__dfCarto(entBefore) : null;
         gf._clearMeshFloorCellsForTest();
         fl._clearDisplayFloorStateForTest();
@@ -3547,23 +4233,13 @@ async function main() {
         fl.setParams({ models3d: true });
         v.scene.requestRender();
         await new Promise((r) => setTimeout(r, 120)); // inside the load window
-        const countRendering = () => {
-          let n = 0;
-          const walk = (coll) => {
-            const len = coll.length;
-            for (let i = 0; i < len; i++) {
-              let p; try { p = coll.get(i); } catch { continue; }
-              if (!p) continue;
-              if (typeof p.length === 'number' && typeof p.get === 'function') { walk(p); continue; }
-              if (p.activeAnimations !== undefined && p.minimumPixelSize !== undefined
-                && p.show && p.ready) n += 1;
-            }
-          };
-          walk(v.scene.primitives);
-          return n;
-        };
-        out.renderingModelsDuringLoad = countRendering();
-        const entLoad = v.trackedEntity?.position?.getValue(Cesium.JulianDate.now());
+        // Count only the contact under test. A headful run can legitimately
+        // render unrelated live fleet or military models at the same time;
+        // those say nothing about whether aaa097's loading handoff is still
+        // billboard-owned. The shared helper keys models by their pick id and
+        // uses the production ownership pair (`show && ready`).
+        out.renderingModelsDuringLoad = window.__dfCountModels('aaa097').rendering;
+        const entLoad = window.__qaFollowed()?.position?.();
         out.trackedSeeded = seededTracked;
         out.trackedLoadH = entLoad ? window.__dfCarto(entLoad).h : null;
         fl.setParams({ models3d: false });
@@ -3576,7 +4252,8 @@ async function main() {
         skip('display-floor/loading: fleet model loading window', dfLoading.skipped);
       } else {
         record('display-floor/loading: a fleet model that is shown-but-not-ready does not own the visual',
-          !dfLoading.error && dfLoading.fleetModelShow === true && dfLoading.fleetModelReady === false
+          !dfLoading.error && dfLoading.fleetTickCompleted === true
+            && dfLoading.fleetModelShow === true && dfLoading.fleetModelReady === false
             && dfLoading.fleetBillboardVisible === true
             && Number.isFinite(dfLoading.fleetH)
             && dfLoading.fleetH >= dfLoading.fleetSeeded + DISPLAY_FLOOR_LIFT_M - 0.5,
@@ -3612,29 +4289,33 @@ async function main() {
         const Cesium = await import('/node_modules/cesium/Build/Cesium/index.js');
         const v = window.__godsEyeView.viewer;
         const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
-        // `.module` is the layer OBJECT (the default export), not the module
-        // namespace, so the handoff seam is not on it. Reach the namespace the
-        // same way this group reaches groundFloor's: offer the URL the app
-        // itself loaded (Vite serves an edited file as `…?t=<hmr stamp>`, and
-        // the plain path would hand back a second, unrelated instance whose
-        // module state the app never touches), then prove identity by requiring
-        // its default export to BE the live layer object.
-        let ns = null;
-        const urls = [...new Set([
-          ...performance.getEntriesByType('resource').map((e) => e.name)
-            .filter((n) => /\/src\/data\/flights\.js(\?|$)/.test(n)).reverse(),
-          '/src/data/flights.js',
-        ])];
-        for (const url of urls) {
-          let mod; try { mod = await import(/* @vite-ignore */ url); } catch { continue; }
-          if (mod?.default === fl && typeof mod._driveFleetModelHandoffForTest === 'function') {
-            ns = mod;
-            break;
-          }
-        }
-        if (!ns) return { skipped: `the app's own flights module was not reachable (tried ${urls.length})` };
-        const bb = window.__dfFindBB('aaa097');
-        if (!bb) return { error: 'aaa097 billboard missing' };
+        // Test the registered instance directly, including catalogs constructed
+        // with their own sources. Never import a second compatibility instance.
+        const ns = fl.testing;
+        if (typeof ns?._driveFleetModelHandoffForTest !== 'function')
+          return { error: "the registered flights instance has no handoff test seam" };
+        // Use a scenario-owned contact so its groundSnap entry is provably cold;
+        // earlier display-floor cases intentionally exercise aaa097's cache.
+        const holdIcao = 'aaa098';
+        const sourceBb = window.__dfFindBB('aaa097');
+        if (!sourceBb) return { error: 'aaa097 source billboard missing' };
+        const source = window.__dfCarto(sourceBb.position);
+        window.__SYNTH.flights = window.__SYNTH.flights.filter((f) => f.icao !== holdIcao);
+        window.__SYNTH.flights.push({
+          icao: holdIcao,
+          callsign: 'HOLD98',
+          lon: source.lon,
+          lat: source.lat,
+          alt: 0,
+          vel: 0,
+          track: 90,
+          onGround: true,
+        });
+        fl.setParams({ models3d: false });
+        await fl.update(v);
+        await window.__dfSettle(600);
+        const bb = window.__dfFindBB(holdIcao);
+        if (!bb) return { error: `${holdIcao} billboard missing` };
         const base = window.__dfCarto(bb.position);
         const basePos = Cesium.Cartesian3.fromDegrees(base.lon, base.lat, base.h);
         // Offered skin: unmistakably not the feed altitude, for the case where
@@ -3643,31 +4324,25 @@ async function main() {
 
         // 1. Open a deterministic skin and let the REAL fleet tick admit, place
         //    and show the model — the arrival path this scenario then interrupts.
-        //    (This contact's snap may already be warm from an earlier scenario,
-        //    in which case the cache answers and the offered skin never fires.
-        //    Either way what the model stands on is a MEASUREMENT, which is the
-        //    only property the hold below is about.)
+        const baseSampleCount = () => window.__dfSkinSamples.filter((sample) => {
+          const dLat = sample.lat - base.lat;
+          const dLon = (sample.lon - base.lon) * Math.cos(base.lat * Math.PI / 180);
+          return Math.hypot(dLat, dLon) <= 0.0002;
+        }).length;
+        const baseSamplesBefore = baseSampleCount();
         window.__dfSkinM = skin;
         fl.setParams({ models3d: true });
-        const up = await window.__dfAwaitTrackedModel('aaa097', 20000);
+        const up = await window.__dfAwaitTrackedModel(holdIcao, 20000);
         if (!up.rendering) {
           window.__dfSkinM = null;
           fl.setParams({ models3d: false });
-          return { skipped: 'no fleet model rendered for aaa097 in this browser' };
+          return { skipped: `no fleet model rendered for ${holdIcao} in this browser` };
         }
-        // The model-availability warm-up above may reuse aaa097's snap from an
-        // earlier display-floor case. That makes this scenario order-dependent:
-        // a later cell can correctly contradict that unrelated measurement and
-        // turn the intended outage hold into a different product rule. Start
-        // this case with its own snap and no independent mesh evidence; the
-        // next handoff must therefore measure the open deterministic skin.
-        fl._clearGroundSnapStateForTest();
-        window.__dfGf._clearMeshFloorCellsForTest();
-        // Re-drive at the position this scenario will measure taxi distance
-        // from. With the scenario-owned caches cold, this fills the snap from
-        // the deterministic skin above rather than inheriting earlier state.
-        const freshOwns = ns._driveFleetModelHandoffForTest({ icao24: 'aaa097', position: basePos, course: 90 });
-        const freshH = window.__dfModelHeight('aaa097');
+        const freshOwns = ns._driveFleetModelHandoffForTest({
+          icao24: holdIcao, position: basePos, course: 90,
+        });
+        const baseSampleHits = baseSampleCount() - baseSamplesBefore;
+        const freshH = window.__dfModelHeight(holdIcao);
 
         // 2. The tiles go away and the contact taxis ~96 m — past the 50 m
         //    resample threshold, inside the hold bound. Every resample from here
@@ -3684,21 +4359,28 @@ async function main() {
         const taxiCarto = window.__dfCarto(taxiPos);
         const baseMeshM = gfns?.cachedMeshFloor?.(baseCarto.lat, baseCarto.lon) ?? null;
         const taxiMeshM = gfns?.cachedMeshFloor?.(taxiCarto.lat, taxiCarto.lon) ?? null;
-        const heldOwns = ns._driveFleetModelHandoffForTest({ icao24: 'aaa097', position: taxiPos, course: 90 });
-        const heldH = window.__dfModelHeight('aaa097');
-        const heldBb = !!window.__dfFindBB('aaa097')?.show;
+        // The layer writes its icon changes to the draw set together once the
+        // current task's microtasks run (data/aircraftIconLayer.js), so the
+        // drawn row is read after that write, with no frame in between.
+        const iconWrites = () => Promise.resolve();
+        const heldOwns = ns._driveFleetModelHandoffForTest({ icao24: holdIcao, position: taxiPos, course: 90 });
+        await iconWrites();
+        const heldH = window.__dfModelHeight(holdIcao);
+        const heldBb = !!window.__dfFindBB(holdIcao)?.show;
 
         // 3. ~385 m out the memory stops describing anywhere this contact has
         //    been. It is released rather than stretched, and the gate takes over.
         const farPos = Cesium.Cartesian3.fromDegrees(base.lon + 0.004, base.lat, base.h);
-        const releasedOwns = ns._driveFleetModelHandoffForTest({ icao24: 'aaa097', position: farPos, course: 90 });
-        const releasedBb = !!window.__dfFindBB('aaa097')?.show;
+        const releasedOwns = ns._driveFleetModelHandoffForTest({ icao24: holdIcao, position: farPos, course: 90 });
+        await iconWrites();
+        const releasedBb = !!window.__dfFindBB(holdIcao)?.show;
 
         fl.setParams({ models3d: false });
         await window.__dfSettle(300);
         return {
           freshOwns,
           freshH,
+          baseSampleHits,
           heldOwns,
           heldH,
           heldBb,
@@ -3728,12 +4410,12 @@ async function main() {
           dfHold.error || `taxi ${Number(dfHold.taxiM).toFixed(1)} m (> 50 m invalidate, < 250 m bound), far step ${Number(dfHold.farM).toFixed(1)} m (> 250 m bound)`);
 
         record('display-floor/hold: a taxi-invalidated ground snap holds the model through the resample backoff',
-          !dfHold.error && dfHold.freshOwns === true && dfHold.heldOwns === true
+          !dfHold.error && dfHold.baseSampleHits > 0
+            && dfHold.freshOwns === true && dfHold.heldOwns === true
             && dfHold.heldBb === false
-            && dfHold.taxiMeshM == null
             && Number.isFinite(dfHold.heldH) && Number.isFinite(dfHold.freshH)
             && Math.abs(dfHold.heldH - dfHold.freshH) < 0.5,
-          dfHold.error || `fresh owns=${dfHold.freshOwns} on a MEASURED floor at ${Number(dfHold.freshH).toFixed(1)} m; tiles gone + ${Number(dfHold.taxiM).toFixed(1)} m taxi → owns=${dfHold.heldOwns} at ${Number(dfHold.heldH).toFixed(1)} m, billboard shown=${dfHold.heldBb} (want owns=true, bb=false: no 3D→2D pop). Independent mesh floor: base=${dfHold.baseMeshM == null ? 'cold' : Number(dfHold.baseMeshM).toFixed(1)} m, taxi=${dfHold.taxiMeshM == null ? 'cold' : Number(dfHold.taxiMeshM).toFixed(1)} m`);
+          dfHold.error || `fresh owns=${dfHold.freshOwns} after ${dfHold.baseSampleHits} positive base sample(s), on a MEASURED floor at ${Number(dfHold.freshH).toFixed(1)} m; tiles gone + ${Number(dfHold.taxiM).toFixed(1)} m taxi → owns=${dfHold.heldOwns} at ${Number(dfHold.heldH).toFixed(1)} m, billboard shown=${dfHold.heldBb} (want owns=true, bb=false: no 3D→2D pop). Independent mesh floor: base=${dfHold.baseMeshM == null ? 'cold' : Number(dfHold.baseMeshM).toFixed(1)} m, taxi=${dfHold.taxiMeshM == null ? 'cold' : Number(dfHold.taxiMeshM).toFixed(1)} m`);
 
         record('display-floor/hold: past the drift bound the hold is released and the model is withheld',
           !dfHold.error && dfHold.releasedOwns === false && dfHold.releasedBb === true,
@@ -3746,12 +4428,22 @@ async function main() {
     // Cleanup: drop the synthetics and the seeded cells so nothing leaks into
     // the run-wide console/HTTP checks below.
     await evalPage(async () => {
-      const v = window.__godsEyeView.viewer;
-      const fl = window.__godsEyeView.dataManager.layers.get('flights').module;
+      const gev = window.__godsEyeView;
+      const v = gev.viewer;
+      const fl = gev.dataManager.layers.get('flights').module;
       window.__SYNTH.flights = window.__SYNTH.flights.filter((f) => !/^aaa09/.test(f.icao));
       fl.stopTracking();
       window.__dfGf?._clearMeshFloorCellsForTest();
       delete v.scene.sampleHeight;
+      if (gev.tileset) {
+        const prior = window.__dfPriorTilesLoadedDescriptor;
+        if (prior) Object.defineProperty(gev.tileset, 'tilesLoaded', prior);
+        else delete gev.tileset.tilesLoaded;
+      }
+      delete window.__dfPriorTilesLoadedDescriptor;
+      delete window.__dfSkinSamples;
+      delete window.__dfSkinM;
+      delete window.__dfObserveTrackedExit;
       await fl.update(v);
     });
 
@@ -3772,6 +4464,7 @@ async function main() {
 
     finishAndExit();
   } finally {
+    if (OFFLINE_IMAGERY) console.log(`  Bundled imagery tiles served: ${offlineImageryRequests}`);
     if (!KEEP_OPEN) {
       await browser.close();
     } else {

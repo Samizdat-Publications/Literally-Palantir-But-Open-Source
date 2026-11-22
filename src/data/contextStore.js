@@ -1,3 +1,5 @@
+import { entityRecord, readEntityRecord } from './entityRecords.js';
+
 const STORE_KEY = '__gevContextStore';
 
 function createStore() {
@@ -36,19 +38,21 @@ export function registerEntityContext(entity, metadata) {
     entity,
     updatedAt: Date.now(),
   };
-  entity.__gevContextId = metadata.id;
+  entityRecord(entity).contextId = metadata.id;
   store.entities.set(metadata.id, record);
   return record;
 }
 
 export function selectEntityContext(entity) {
   const store = getContextStore();
-  const contextId = entity?.__gevContextId;
+  const contextId = readEntityRecord(entity)?.contextId;
   if (!contextId || !store.entities.has(contextId)) return null;
   store.selectedEntityId = contextId;
   store.selectedAt = Date.now();
   const record = store.entities.get(contextId);
-  window.dispatchEvent(new CustomEvent('gev:entity-selected', { detail: record }));
+  window.dispatchEvent(
+    new CustomEvent('gev:entity-selected', { detail: record }),
+  );
   return record;
 }
 
@@ -78,10 +82,11 @@ export function selectTrackedSubjectContext(metadata) {
   const store = getContextStore();
   const id = String(metadata.id);
   for (const [key, record] of store.entities) {
-    if (record?.layerId === metadata.layerId && key !== id) store.entities.delete(key);
+    if (record?.layerId === metadata.layerId && key !== id)
+      store.entities.delete(key);
   }
   // Reuse the existing carrier so a per-poll refresh does not churn identity.
-  const carrier = store.entities.get(id)?.entity || { __gevContextId: id };
+  const carrier = store.entities.get(id)?.entity || {};
   const record = registerEntityContext(carrier, { ...metadata, id });
   if (!record) return null;
   store.selectedEntityId = id;
@@ -146,33 +151,44 @@ export function getSelectedEntityContext({ dataManager = null } = {}) {
  *   rather than being deselected. Readouts that stay on screen hold their
  *   last-known values for an eviction and only tear down on a deliberate clear.
  */
-export function clearSelectedEntityContextForLayer(layerId, { evicted = false } = {}) {
+export function clearSelectedEntityContextForLayer(
+  layerId,
+  { evicted = false } = {},
+) {
   const store = getContextStore();
   if (!store.selectedEntityId) return;
   const record = store.entities.get(store.selectedEntityId);
   if (record?.layerId === layerId) {
     store.selectedEntityId = null;
     store.selectedAt = null;
-    window.dispatchEvent(new CustomEvent('gev:entity-selection-cleared', {
-      detail: { layerId, reason: evicted ? 'evicted' : 'deliberate' },
-    }));
+    window.dispatchEvent(
+      new CustomEvent('gev:entity-selection-cleared', {
+        detail: { layerId, reason: evicted ? 'evicted' : 'deliberate' },
+      }),
+    );
   }
 }
 
-/** Remove obsolete context records when a viewport-scoped layer refreshes. */
-export function removeEntityContextsForLayer(layerId) {
+/**
+ * Remove obsolete context records when a viewport-scoped layer refreshes.
+ * Optional retainIds keeps surviving records and their current selection intact.
+ */
+export function removeEntityContextsForLayer(layerId, { retainIds } = {}) {
   const store = getContextStore();
   for (const [id, record] of store.entities) {
-    if (record?.layerId === layerId) store.entities.delete(id);
+    if (record?.layerId === layerId && !retainIds?.has(id))
+      store.entities.delete(id);
   }
   if (store.selectedEntityId && !store.entities.has(store.selectedEntityId)) {
     store.selectedEntityId = null;
     store.selectedAt = null;
     // A viewport refresh dropped the record out from under the selection —
     // the user did not deselect anything.
-    window.dispatchEvent(new CustomEvent('gev:entity-selection-cleared', {
-      detail: { layerId, reason: 'evicted' },
-    }));
+    window.dispatchEvent(
+      new CustomEvent('gev:entity-selection-cleared', {
+        detail: { layerId, reason: 'evicted' },
+      }),
+    );
   }
 }
 
@@ -180,6 +196,7 @@ export function isContextRecordActive(record, dataManager = null) {
   if (!record) return false;
   if (record.entity?.show === false) return false;
   if (record.dataSource && record.dataSource.show === false) return false;
-  if (dataManager && record.layerId && !dataManager.isEnabled(record.layerId)) return false;
+  if (dataManager && record.layerId && !dataManager.isEnabled(record.layerId))
+    return false;
   return true;
 }

@@ -13,7 +13,7 @@ const luma = ([r, g, b]) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 
 const BUCKETS = ['free', 'slow', 'jam'];
 const MONO_STYLES = ['surveillance', 'thermal', 'noir'];
-const NORMAL_STYLES = ['normal', 'anime', 'snow', 'does-not-exist', '', undefined, null];
+const NORMAL_STYLES = ['normal', 'anime', 'does-not-exist', '', undefined, null];
 
 test('profile mapping: NVG/FLIR/noir are mono, retro is crt, everything else normal', () => {
   for (const s of MONO_STYLES) assert.equal(trafficStyleProfile(s), 'mono', s);
@@ -39,7 +39,7 @@ test('sim/uncovered dots (null bucket) are untouched under EVERY style — keyle
   }
 });
 
-test('mono: EVERY colored dot is a bright white core (follow-up round 2: "just bright dots")', () => {
+test('mono: EVERY colored dot is a bright white core (owner round 2: "just bright dots")', () => {
   for (const s of MONO_STYLES) {
     for (const b of BUCKETS) {
       const rgba = presetDotRgba(s, b);

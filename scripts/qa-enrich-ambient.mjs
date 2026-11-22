@@ -12,7 +12,7 @@
  * honoring the politeness bounds.
  *
  * Fetch shim (installed before app code, same pattern as qa-sprites-b5.mjs):
- *   - /api/opensky           → 12 straight-flying planes, category 0
+ *   - /api/flights           → 12 straight-flying planes, category 0
  *   - /api/adsbdb/type/:hex  → varied REAL type codes (C172, B744, DH8D, H60,
  *                              F16, GLID, B77W, A320, B738, PC12, R44) + one
  *                              found:false miss; responses are HELD until the
@@ -29,7 +29,7 @@
  *   E4 diversity : ≥5 distinct glyph data-URIs displayed ambiently after
  *                  enrichment (expected: 8)
  *   E5 glyphs    : every billboard's image === aircraftIcon(classify(typeCode))
- *   E6 scales    : every billboard's scale === CLASS_SCALE_2D[klass]
+ *   E6 scales    : every billboard's scale === 1, whatever its class
  *   E7 bounds    : ≤4 concurrent requests, ≥185 ms between dispatches (≤5/s
  *                  drip), total ≤300 (budget ceiling)
  *   E8 next poll : another poll neither reverts glyphs nor re-requests hexes
@@ -53,7 +53,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import puppeteer from 'puppeteer';
-import { classifyAircraft, CLASS_SCALE_2D } from '../src/data/aircraftClass.js';
+import { classifyAircraft } from '../src/data/aircraftClass.js';
 import { aircraftIcon } from '../src/data/aircraftIcons.js';
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ const CHROME_EXECUTABLE_CANDIDATES = [
   // tile-gated drain budget under SwiftShader on 2026-07-30 — six
   // false-negative qa-cctv-v2 runs against a healthy build). A deterministic
   // pinned browser beats the newest one for regression harnesses.
-  (() => { try { return puppeteer.executablePath(); } catch { return null; } })(),
+  await puppeteer.executablePath().catch(() => null),
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
@@ -260,14 +260,14 @@ async function main() {
           });
         }
         if (url.includes('/api/adsbdb/')) return Promise.resolve(jsonResponse({ found: false }));
-        if (url.includes('/api/opensky-track')) return Promise.resolve(jsonResponse({ path: [] }));
-        if (url.includes('/api/adsblol/trace')) {
+        if (url.includes('/api/flights/track')) return Promise.resolve(jsonResponse({ path: [] }));
+        if (url.includes('/api/military/track')) {
           return Promise.resolve(jsonResponse({ timestamp: Math.floor(nowSec), trace: [] }));
         }
-        if (url.includes('/api/adsblol/mil')) {
+        if (url.includes('/api/military')) {
           return Promise.resolve(jsonResponse({ msg: 'No error', now: Date.now(), ac: [] }));
         }
-        if (url.includes('/api/opensky')) {
+        if (url.includes('/api/flights')) {
           const states = S.planes.map((f) => {
             const s = S.stateAt(f, tRel);
             return [
@@ -362,7 +362,7 @@ async function main() {
       const bb = beforeById.get(hex);
       if (!bb) baselineBad.push(`${hex}:missing`);
       else if (bb.image !== AIRLINER_ICON) baselineBad.push(`${hex}:not-default-glyph`);
-      else if (Math.abs(bb.scale - (CLASS_SCALE_2D.airliner || 1)) > 1e-9) baselineBad.push(`${hex}:scale=${bb.scale}`);
+      else if (Math.abs(bb.scale - 1) > 1e-9) baselineBad.push(`${hex}:scale=${bb.scale}`);
     }
     record('E2 baseline: all 12 category-0 planes default to the airliner glyph',
       baselineBad.length === 0,
@@ -415,13 +415,13 @@ async function main() {
     for (const [hex, klass] of expected) {
       const bb = afterById.get(hex);
       const wantImg = aircraftIcon(klass);
-      const wantScale = CLASS_SCALE_2D[klass] || 1;
+      const wantScale = 1;
       if (!bb || bb.image !== wantImg) glyphBad.push(`${hex}(${klass})${bb ? ':wrong-image' : ':missing'}`);
       if (bb && Math.abs(bb.scale - wantScale) > 1e-9) scaleBad.push(`${hex}: ${bb.scale} != ${wantScale}`);
     }
     record('E5 glyphs: every billboard matches aircraftIcon(classify(typeCode))',
       glyphBad.length === 0, glyphBad.length ? glyphBad.join(' ') : `${expected.size} matched (incl. the found:false miss staying airliner)`);
-    record('E6 scales: every billboard has its per-class CLASS_SCALE_2D',
+    record('E6 scales: every billboard has the one fleet scale',
       scaleBad.length === 0, scaleBad.length ? scaleBad.join(' ') : 'all scales exact (composes with scaleByDistance)');
 
     await page.screenshot({ path: path.join(SHOT_DIR, 'enrich-after-diverse.png') });
@@ -469,7 +469,7 @@ async function main() {
     for (const [hex, klass] of expected) {
       const bb = afterPollById.get(hex);
       if (!bb || bb.image !== aircraftIcon(klass)) pollBad.push(`${hex}(${klass})${bb ? ':reverted' : ':missing'}`);
-      else if (Math.abs(bb.scale - (CLASS_SCALE_2D[klass] || 1)) > 1e-9) pollBad.push(`${hex}:scale-reverted`);
+      else if (Math.abs(bb.scale - 1) > 1e-9) pollBad.push(`${hex}:scale-reverted`);
     }
     const noReRequests = afterPoll.starts === Object.keys(TYPES).length;
     record('E8 next poll: enriched glyphs persist and no hex is re-requested',

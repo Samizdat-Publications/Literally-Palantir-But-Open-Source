@@ -1,0 +1,339 @@
+// Camera ground-guard policy tests: pure arithmetic plus a fake scene, no network.
+//
+// Arrival framing is computed before the destination's tiles exist, so it
+// works from a predicted ground height. The guard measures the real surface
+// after arrival and lifts the eye; these tests pin when it acts.
+import {
+  bindFakeCesiumCamera,
+  followEntity,
+} from './testSupport/fakeCameraPort.mjs';
+import { rendererOf } from './render/rendererOf.js';
+import { fakeSceneQuery } from './testSupport/fakeCesiumScene.mjs';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import * as Cesium from 'cesium';
+import {
+  MIN_EYE_CLEARANCE_M,
+  groundClearanceDeficitM,
+  guardCameraAboveGround,
+} from './cameraGroundGuard.js';
+
+test('a buried camera is lifted clear of the surface', () => {
+  // Framed near sea level, arriving over ground at ~1,609 m (Denver).
+  const lift = groundClearanceDeficitM(140, 1609);
+  assert.equal(lift, 1609 + MIN_EYE_CLEARANCE_M - 140);
+});
+
+test('a camera resting on the surface is lifted to a usable height', () => {
+  // Camp Mabry field report: eye 1 m above the mesh at 171 m.
+  assert.equal(groundClearanceDeficitM(172, 171), MIN_EYE_CLEARANCE_M - 1);
+});
+
+test('a well-framed arrival is left alone', () => {
+  assert.equal(groundClearanceDeficitM(1755, 1609), 0);
+  assert.equal(groundClearanceDeficitM(2960, 1609), 0);
+});
+
+test('sub-metre noise never triggers a nudge', () => {
+  assert.equal(groundClearanceDeficitM(1609 + MIN_EYE_CLEARANCE_M, 1609), 0);
+  assert.equal(
+    groundClearanceDeficitM(1609 + MIN_EYE_CLEARANCE_M - 1, 1609),
+    0,
+  );
+});
+
+test('an unmeasurable surface is never acted on', () => {
+  assert.equal(groundClearanceDeficitM(1000, Number.NaN), 0);
+  assert.equal(groundClearanceDeficitM(Number.NaN, 1609), 0);
+  assert.equal(groundClearanceDeficitM(1000, undefined), 0);
+});
+
+test('the clearance frames a subject without turning into an overflight', () => {
+  assert.ok(MIN_EYE_CLEARANCE_M >= 60);
+  assert.ok(MIN_EYE_CLEARANCE_M <= 250);
+});
+
+/**
+ * Count the listeners for `viewer`'s camera port follow changes, from now on.
+ * @returns {() => number}
+ */
+function countFollowListeners(viewer) {
+  const renderer = rendererOf(viewer);
+  const port = renderer.camera;
+  let listeners = 0;
+  renderer.camera = Object.create(port, {
+    on: {
+      value(event, cb, options) {
+        const off = port.on(event, cb, options);
+        if (event !== 'followChanged') return off;
+        listeners += 1;
+        let live = true;
+        return () => {
+          if (live) listeners -= 1;
+          live = false;
+          off();
+        };
+      },
+    },
+  });
+  return () => listeners;
+}
+
+function fakeViewer({ cameraHeightM, surfaceM, tracks = false }) {
+  const flights = [];
+  const position = Cesium.Cartographic.fromDegrees(
+    -97.7603,
+    30.3141,
+    cameraHeightM,
+  );
+  const viewer = {
+    flights,
+    scene: {
+      canvas: null,
+      sampleHeightSupported: true,
+      sampleHeight: (carto) =>
+        typeof surfaceM === 'function' ? surfaceM(carto) : surfaceM,
+    },
+    camera: {
+      positionCartographic: position,
+      positionWC: Cesium.Cartographic.toCartesian(position),
+      directionWC: new Cesium.Cartesian3(0, 0, -1),
+      upWC: new Cesium.Cartesian3(0, 1, 0),
+      heading: 0.5,
+      pitch: -0.55,
+      roll: 0,
+      // As Cesium does: a flight is under way until it completes.
+      _currentFlight: undefined,
+      flyTo(options) {
+        flights.push(options);
+        this._currentFlight = {};
+      },
+    },
+  };
+  // Cesium's entity tracking, without entities of its own: the camera
+  // port follows on a tracking widget of the fake's.
+  if (tracks)
+    Object.assign(viewer, {
+      trackedEntityChanged: new Cesium.Event(),
+      entities: {},
+    });
+  return bindFakeCesiumCamera(viewer, { query: fakeSceneQuery(viewer) });
+}
+
+test('the guard lifts a buried arrival once the surface answers', async () => {
+  const viewer = fakeViewer({ cameraHeightM: 172, surfaceM: 171 });
+  const lifts = [];
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 1, onLift: (m) => lifts.push(m) },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(viewer.flights.length, 1);
+  const lifted = Cesium.Cartographic.fromCartesian(
+    viewer.flights[0].destination,
+  );
+  assert.ok(Math.abs(lifted.height - (171 + MIN_EYE_CLEARANCE_M)) < 0.5);
+  assert.equal(viewer.flights[0].orientation.heading, 0.5);
+  assert.equal(lifts.length, 1);
+});
+
+test('the guard waits for streaming tiles and yields to a newer arrival', async () => {
+  let answer = Number.NaN;
+  let stale = false;
+  const viewer = fakeViewer({ cameraHeightM: 172, surfaceM: () => answer });
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 2, attempts: 20, isStale: () => stale },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  assert.equal(viewer.flights.length, 0, 'no guess while tiles stream in');
+  stale = true;
+  answer = 171;
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  assert.equal(viewer.flights.length, 0, 'a newer arrival owns the camera');
+});
+
+test('the guard leaves a clear view untouched', async () => {
+  const viewer = fakeViewer({ cameraHeightM: 400, surfaceM: 171 });
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 1 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(viewer.flights.length, 0);
+});
+
+// Handoffs act before the delayed probe, even when the next owner stays low.
+import { NavigationController } from './ui/navigationController.js';
+import { SceneDirector } from './scenes/director.js';
+import { LayerLifecycle } from './data/lifecycle.js';
+
+function handoffFixture(t) {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const viewer = fakeViewer({
+    cameraHeightM: 172,
+    surfaceM: 171,
+    tracks: true,
+  });
+  const followListeners = countFollowListeners(viewer);
+  viewer.scene.canvas = new EventTarget();
+  viewer.scene.canvas.ownerDocument = new EventTarget();
+  viewer.camera.cancelFlight = () => {};
+  viewer.camera.lookAtTransform = () => {};
+  viewer.camera.flyToBoundingSphere = function () {
+    this._currentFlight = {};
+  };
+  viewer.camera.setView = function () {
+    this.positionWC = Cesium.Cartesian3.add(
+      this.positionWC,
+      new Cesium.Cartesian3(0, 0, 50),
+      new Cesium.Cartesian3(),
+    );
+  };
+  const originalFly = viewer.camera.flyTo;
+  const navigation = new NavigationController({
+    viewer,
+    tracking: Object.fromEntries(
+      [
+        'flightsLayer',
+        'militaryFlightsLayer',
+        'satellitesLayer',
+        'aisLiveVesselsLayer',
+        'militaryAwarenessLayer',
+        'rocketLaunchesLayer',
+      ].map((key) => [key, {}]),
+    ),
+    cancelOrientation() {},
+    clearLocation() {},
+    cancelShareSelection() {},
+    getDataManager() {},
+    interruptCameraMotion() {},
+    stopOrbit() {},
+    isCockpitActive: () => false,
+    showToast() {},
+  });
+  guardCameraAboveGround(viewer, { lat: 30.3, lon: -97.7 });
+  return { viewer, navigation, originalFly, followListeners };
+}
+
+for (const handoff of [
+  'Director',
+  'tracking',
+  'follow',
+  'keyboard',
+  'UI',
+  'flyTo',
+  'flyToBoundingSphere',
+  'setView',
+  'layer-disable',
+  'layer-destroy',
+  'app-stop',
+]) {
+  test(`arrival guard relinquishes and removes hooks on ${handoff}`, async (t) => {
+    const { viewer, navigation, originalFly, followListeners } =
+      handoffFixture(t);
+    const methods = [
+      'flyTo',
+      'flyToBoundingSphere',
+      'setView',
+      'lookAt',
+      'cancelFlight',
+    ].map((name) => viewer.camera[name]);
+    if (handoff === 'Director') {
+      SceneDirector.prototype._claimCameraOwnership.call({
+        viewer,
+        styleManager: {
+          runImmediateNavigation: (noun, fn) =>
+            navigation._runExplicitNavigation(noun, fn),
+        },
+      });
+    } else if (handoff === 'tracking') {
+      followEntity(viewer, { id: 'contact' });
+    } else if (handoff === 'follow' || handoff === 'UI') {
+      navigation._stampNavigation({ cancelPendingSelection: false });
+    } else if (handoff === 'keyboard') {
+      viewer.scene.canvas.ownerDocument.dispatchEvent(new Event('keydown'));
+    } else if (handoff === 'app-stop') navigation.stop();
+    else if (handoff.startsWith('layer-')) {
+      const lifecycle = new LayerLifecycle(viewer);
+      lifecycle.register({
+        id: 'test',
+        init() {},
+        enable() {},
+        disable() {},
+        destroy() {},
+      });
+      await lifecycle.setEnabled('test', true);
+      if (handoff === 'layer-disable')
+        await lifecycle.setEnabled('test', false);
+      else await lifecycle.destroyLayer('test');
+    } else viewer.camera[handoff]({});
+    // A direct flyTo is itself one recorded flight; the guard adds none.
+    const priorFlights = viewer.flights.length;
+    t.mock.timers.tick(10000);
+    assert.equal(
+      viewer.flights.length,
+      priorFlights,
+      'the old probe cannot fly',
+    );
+    assert.equal(viewer.camera.flyTo, originalFly);
+    assert.deepEqual(
+      ['flyTo', 'flyToBoundingSphere', 'setView', 'lookAt', 'cancelFlight'].map(
+        (name) => viewer.camera[name],
+      ),
+      methods,
+      'the guard never replaces camera methods',
+    );
+    assert.equal(followListeners(), 0);
+    navigation.destroy();
+  });
+}
+
+test('the guard yields to a camera moved without any camera method', async () => {
+  const viewer = fakeViewer({ cameraHeightM: 172, surfaceM: 171 });
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 5 },
+  );
+  // A cockpit or follow frame writes the pose directly.
+  viewer.camera.directionWC = new Cesium.Cartesian3(1, 0, 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(viewer.flights.length, 0, 'the moved view is not corrected');
+});
+
+test('Cesium lifting a buried eye straight up is not another owner', async () => {
+  const viewer = fakeViewer({ cameraHeightM: 104, surfaceM: 171 });
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 5 },
+  );
+  // Terrain collision raises the eye to just above the loaded ground.
+  const raised = Cesium.Cartographic.fromDegrees(-97.7603, 30.3141, 172);
+  viewer.camera.positionCartographic = raised;
+  viewer.camera.positionWC = Cesium.Cartographic.toCartesian(raised);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(viewer.flights.length, 1, 'the guard still lifts the eye');
+  const lifted = Cesium.Cartographic.fromCartesian(
+    viewer.flights[0].destination,
+  );
+  assert.ok(Math.abs(lifted.height - (171 + MIN_EYE_CLEARANCE_M)) < 0.5);
+});
+
+test('another owner lowering the eye is not corrected', async () => {
+  const viewer = fakeViewer({ cameraHeightM: 172, surfaceM: 171 });
+  guardCameraAboveGround(
+    viewer,
+    { lat: 30.3125, lon: -97.765 },
+    { intervalMs: 5 },
+  );
+  const lowered = Cesium.Cartographic.fromDegrees(-97.7603, 30.3141, 150);
+  viewer.camera.positionCartographic = lowered;
+  viewer.camera.positionWC = Cesium.Cartographic.toCartesian(lowered);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(viewer.flights.length, 0);
+});

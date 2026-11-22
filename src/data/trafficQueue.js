@@ -1,7 +1,7 @@
 /**
  * @file Queue-spawn helpers for jammed roads — platoon position math only.
  * Cesium-free so bumper-to-bumper spacing is unit-testable; the traffic
- * layer maps the returned distances onto Cartesian3 waypoints at spawn time.
+ * layer maps the returned distances onto ECEF waypoints at spawn time.
  *
  * Only ever used for live-flow jam-bucket roads (jamViz 'density'/'both');
  * the keyless simulation never calls into this module.
@@ -33,13 +33,14 @@ const GAP_SPREAD_M = 6;
  */
 export function queuePlatoons(totalLen, count, rng = Math.random) {
   const platoons = [];
-  if (!Number.isFinite(totalLen) || totalLen <= 0 || !(count > 0)) return platoons;
+  if (!Number.isFinite(totalLen) || totalLen <= 0 || !(count > 0))
+    return platoons;
 
   let placed = 0;
   while (placed < count) {
     const platoonSize = Math.min(
       count - placed,
-      PLATOON_MIN + Math.floor(rng() * PLATOON_SPREAD)
+      PLATOON_MIN + Math.floor(rng() * PLATOON_SPREAD),
     );
     const anchor = rng() * totalLen;
     const platoon = [];

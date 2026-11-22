@@ -49,22 +49,34 @@ export function clearWorldOverlayTextMeasureCache() {
 
 /** Install the font-loading invalidation hooks once, when the API exists. */
 export function installWorldOverlayFontInvalidation() {
-  if (_fontInvalidationInstalled || typeof document === 'undefined' || !document.fonts) return;
+  if (
+    _fontInvalidationInstalled ||
+    typeof document === 'undefined' ||
+    !document.fonts
+  )
+    return;
   _fontInvalidationInstalled = true;
   _observedFontSet = document.fonts;
   const generation = ++_fontInvalidationGeneration;
   Promise.resolve(document.fonts.ready)
     .then(() => {
-      if (generation === _fontInvalidationGeneration) clearWorldOverlayTextMeasureCache();
+      if (generation === _fontInvalidationGeneration)
+        clearWorldOverlayTextMeasureCache();
     })
     .catch(() => {});
-  _observedFontSet.addEventListener?.('loadingdone', clearWorldOverlayTextMeasureCache);
+  _observedFontSet.addEventListener?.(
+    'loadingdone',
+    clearWorldOverlayTextMeasureCache,
+  );
 }
 
 /** Remove font hooks and cached measurements when the overlay host is destroyed. */
 export function destroyWorldOverlayDraw() {
   _fontInvalidationGeneration++;
-  _observedFontSet?.removeEventListener?.('loadingdone', clearWorldOverlayTextMeasureCache);
+  _observedFontSet?.removeEventListener?.(
+    'loadingdone',
+    clearWorldOverlayTextMeasureCache,
+  );
   _observedFontSet = null;
   _fontInvalidationInstalled = false;
   clearWorldOverlayTextMeasureCache();
@@ -95,7 +107,8 @@ export function measureWorldOverlayText(ctx, text, font) {
   }
   fontCache.set(normalizedText, { width, usedAt: ++_textMeasureClock });
   _textMeasureCacheSize++;
-  if (_textMeasureCacheSize > TEXT_MEASURE_CACHE_LIMIT) evictOldestTextMeasureEntry();
+  if (_textMeasureCacheSize > TEXT_MEASURE_CACHE_LIMIT)
+    evictOldestTextMeasureEntry();
   return width;
 }
 
@@ -113,7 +126,14 @@ export function getWorldOverlayTextMeasureCacheSize() {
  * @param {number} h
  * @param {number} radius
  */
-export function roundedRectPath(path, x, y, w, h, radius = WORLD_OVERLAY_STYLE.radius) {
+export function roundedRectPath(
+  path,
+  x,
+  y,
+  w,
+  h,
+  radius = WORLD_OVERLAY_STYLE.radius,
+) {
   if (typeof path.roundRect === 'function') {
     path.roundRect(x, y, w, h, radius);
     return;
@@ -137,11 +157,14 @@ export function roundedRectPath(path, x, y, w, h, radius = WORLD_OVERLAY_STYLE.r
  * @param {number} [options.fadeStartRatio]
  * @returns {number}
  */
-export function distanceFade(distanceM, {
-  minDistance = 0,
-  maxDistance = Number.POSITIVE_INFINITY,
-  fadeStartRatio = 0.7,
-} = {}) {
+export function distanceFade(
+  distanceM,
+  {
+    minDistance = 0,
+    maxDistance = Number.POSITIVE_INFINITY,
+    fadeStartRatio = 0.7,
+  } = {},
+) {
   if (!Number.isFinite(distanceM)) return 0;
   const min = Number.isFinite(minDistance) ? Math.max(0, minDistance) : 0;
   if (distanceM < min) return 0;
@@ -192,17 +215,27 @@ export function altitudeScale(altitudeM, curve = null) {
   const end = Number(curve.end);
   const midValue = Number(curve.midValue);
   const endValue = Number(curve.endValue);
-  if (!Number.isFinite(fullEnd) || !Number.isFinite(midEnd) || !Number.isFinite(end)
-    || !Number.isFinite(midValue) || !Number.isFinite(endValue)) return 1;
+  if (
+    !Number.isFinite(fullEnd) ||
+    !Number.isFinite(midEnd) ||
+    !Number.isFinite(end) ||
+    !Number.isFinite(midValue) ||
+    !Number.isFinite(endValue)
+  )
+    return 1;
   if (altitudeM <= fullEnd) return 1;
   if (altitudeM <= midEnd) {
     const span = Math.max(1, midEnd - fullEnd);
     let progress = Math.max(0, Math.min(1, (altitudeM - fullEnd) / span));
-    if (curve.smoothToMid === true) progress = progress * progress * (3 - 2 * progress);
+    if (curve.smoothToMid === true)
+      progress = progress * progress * (3 - 2 * progress);
     return 1 + (midValue - 1) * progress;
   }
   if (altitudeM >= end) return endValue;
-  const progress = Math.max(0, Math.min(1, (altitudeM - midEnd) / Math.max(1, end - midEnd)));
+  const progress = Math.max(
+    0,
+    Math.min(1, (altitudeM - midEnd) / Math.max(1, end - midEnd)),
+  );
   return midValue + (endValue - midValue) * progress;
 }
 
@@ -215,11 +248,14 @@ export function altitudeScale(altitudeM, curve = null) {
  * @param {number} [options.fadeEnd]
  * @returns {number}
  */
-export function altitudeFade(altitudeM, {
-  minAltitude = Number.NEGATIVE_INFINITY,
-  fadeStart = Number.POSITIVE_INFINITY,
-  fadeEnd = Number.POSITIVE_INFINITY,
-} = {}) {
+export function altitudeFade(
+  altitudeM,
+  {
+    minAltitude = Number.NEGATIVE_INFINITY,
+    fadeStart = Number.POSITIVE_INFINITY,
+    fadeEnd = Number.POSITIVE_INFINITY,
+  } = {},
+) {
   if (!Number.isFinite(altitudeM)) return 1;
   if (Number.isFinite(minAltitude) && altitudeM < minAltitude) return 0;
   if (!Number.isFinite(fadeEnd)) return 1;
@@ -238,24 +274,32 @@ export function combinedOverlayAlpha({
   altitudeFade: altitudeAlpha = 1,
   keyholeEdgeFade = 1,
 } = {}) {
-  return clampUnit(sourceAlpha)
-    * clampUnit(temporalFade)
-    * clampUnit(distanceAlpha)
-    * clampUnit(altitudeAlpha)
-    * clampUnit(keyholeEdgeFade);
+  return (
+    clampUnit(sourceAlpha) *
+    clampUnit(temporalFade) *
+    clampUnit(distanceAlpha) *
+    clampUnit(altitudeAlpha) *
+    clampUnit(keyholeEdgeFade)
+  );
 }
 
 function clampUnit(value) {
-  return Number.isFinite(Number(value)) ? Math.max(0, Math.min(1, Number(value))) : 1;
+  return Number.isFinite(Number(value))
+    ? Math.max(0, Math.min(1, Number(value)))
+    : 1;
 }
 
 function trackDisplayText(entry) {
   const title = entry?.title || '';
   const detail = Array.isArray(entry?.details) ? entry.details[0] || '' : '';
-  if (entry._overlayTrackDisplayTitle !== title || entry._overlayTrackDisplayDetail !== detail) {
+  if (
+    entry._overlayTrackDisplayTitle !== title ||
+    entry._overlayTrackDisplayDetail !== detail
+  ) {
     entry._overlayTrackDisplayTitle = title;
     entry._overlayTrackDisplayDetail = detail;
-    entry._overlayTrackDisplayText = title && detail ? `${title} · ${detail}` : title || detail;
+    entry._overlayTrackDisplayText =
+      title && detail ? `${title} · ${detail}` : title || detail;
   }
   return entry._overlayTrackDisplayText || '';
 }
@@ -268,16 +312,24 @@ function trackDisplayText(entry) {
  * @returns {{w:number,h:number,padX:number,padY:number,titleH:number,lineH:number,thumbW:number,thumbH:number}}
  */
 export function measureOverlayEntry(ctx, entry, out = {}) {
-  const variant = entry?.selected ? 'selected' : String(entry?.variant || 'label');
+  const variant =
+    entry?.selected && entry?.variant !== 'thumbnail'
+      ? 'selected'
+      : String(entry?.variant || 'label');
   const details = Array.isArray(entry?.details) ? entry.details : [];
   const selected = variant === 'selected';
   const tracked = variant === 'tracked';
   const tactical = entry?.cardStyle === 'tactical';
   const titleFont = tracked
     ? WORLD_OVERLAY_STYLE.fontTrackedTitle
-    : selected ? WORLD_OVERLAY_STYLE.fontSelected : WORLD_OVERLAY_STYLE.fontTitle;
-  let titleWidth = measureWorldOverlayText(ctx, entry?.title || '',
-    variant === 'label' ? WORLD_OVERLAY_STYLE.fontLabel : titleFont);
+    : selected
+      ? WORLD_OVERLAY_STYLE.fontSelected
+      : WORLD_OVERLAY_STYLE.fontTitle;
+  let titleWidth = measureWorldOverlayText(
+    ctx,
+    entry?.title || '',
+    variant === 'label' ? WORLD_OVERLAY_STYLE.fontLabel : titleFont,
+  );
   if (variant === 'track' && details[0]) {
     titleWidth = measureWorldOverlayText(
       ctx,
@@ -292,16 +344,38 @@ export function measureOverlayEntry(ctx, entry, out = {}) {
       measureWorldOverlayText(
         ctx,
         details[i],
-        tracked ? WORLD_OVERLAY_STYLE.fontTrackedDetail : WORLD_OVERLAY_STYLE.fontDetail,
+        tracked
+          ? WORLD_OVERLAY_STYLE.fontTrackedDetail
+          : WORLD_OVERLAY_STYLE.fontDetail,
       ),
     );
   }
 
-  out.padX = tracked ? 13 : selected ? 12 : variant === 'label' || variant === 'track' ? 6 : 9;
-  out.padY = tracked ? 9 : selected ? 8 : variant === 'label' || variant === 'track' ? 4 : 6;
+  out.padX = tracked
+    ? 13
+    : selected
+      ? 12
+      : variant === 'label' || variant === 'track'
+        ? 6
+        : 9;
+  out.padY = tracked
+    ? 9
+    : selected
+      ? 8
+      : variant === 'label' || variant === 'track'
+        ? 4
+        : 6;
   out.titleH = tactical
-    ? (selected ? 14 : 12)
-    : tracked ? 13 : selected ? 15 : variant === 'label' || variant === 'track' ? 11 : 13;
+    ? selected
+      ? 14
+      : 12
+    : tracked
+      ? 13
+      : selected
+        ? 15
+        : variant === 'label' || variant === 'track'
+          ? 11
+          : 13;
   out.lineH = tracked ? 17 : selected ? 15 : 13;
   out.thumbW = 0;
   out.thumbH = 0;
@@ -311,11 +385,20 @@ export function measureOverlayEntry(ctx, entry, out = {}) {
     out.padY = Math.max(0, Number(entry?.thumbnailPadTop) || 0);
     out.padBottom = Math.max(0, Number(entry?.thumbnailPadBottom) || 0);
     out.titleGap = Math.max(0, Number(entry?.thumbnailTitleGap) || 0);
-    out.titleH = Math.max(0, Number(entry?.thumbnailTitleHeight) || out.titleH);
+    const thumbnailTitleHeight = Number(entry?.thumbnailTitleHeight);
+    out.titleH = Number.isFinite(thumbnailTitleHeight)
+      ? Math.max(0, thumbnailTitleHeight)
+      : out.titleH;
     out.thumbW = Math.max(1, Number(entry?.thumbnailWidth) || 96);
     out.thumbH = Math.max(1, Number(entry?.thumbnailHeight) || 54);
     out.w = out.thumbW + out.padX * 2;
-    out.h = out.padY + out.thumbH + out.titleGap + out.titleH + out.padBottom;
+    out.h =
+      out.padY +
+      out.thumbH +
+      out.titleGap +
+      out.titleH +
+      details.length * out.lineH +
+      out.padBottom;
   } else {
     out.w = Math.ceil(Math.max(titleWidth, detailWidth)) + out.padX * 2;
     out.h = out.padY * 2 + out.titleH + details.length * out.lineH;
@@ -325,7 +408,17 @@ export function measureOverlayEntry(ctx, entry, out = {}) {
   return out;
 }
 
-function writePlacement(out, corner, x, y, w, h, anchorX, anchorY, signedLeaderOffset = 0) {
+function writePlacement(
+  out,
+  corner,
+  x,
+  y,
+  w,
+  h,
+  anchorX,
+  anchorY,
+  signedLeaderOffset = 0,
+) {
   const placement = out || {};
   placement.corner = corner;
   placement.rect ||= {};
@@ -350,12 +443,17 @@ function writePlacement(out, corner, x, y, w, h, anchorX, anchorY, signedLeaderO
     // pushed the card sideways off its anchor, which reads as "the card isn't
     // attached to that camera".
     placement.leadToX = anchorX;
-    placement.leadToY = corner === 'above' ? placement.rect.y + h : placement.rect.y;
+    placement.leadToY =
+      corner === 'above' ? placement.rect.y + h : placement.rect.y;
   } else {
     placement.leadFromX = anchorX;
     placement.leadFromY = anchorY;
-    placement.leadToX = corner === 'left' ? placement.rect.x + w : placement.rect.x;
-    placement.leadToY = Math.max(placement.rect.y, Math.min(anchorY, placement.rect.y + h));
+    placement.leadToX =
+      corner === 'left' ? placement.rect.x + w : placement.rect.x;
+    placement.leadToY = Math.max(
+      placement.rect.y,
+      Math.min(anchorY, placement.rect.y + h),
+    );
   }
   return placement;
 }
@@ -373,7 +471,10 @@ const VERTICAL_PLACEMENT_ORDERS = Object.freeze({
 });
 
 function clampPlacementCoordinate(value, size, viewportSize, margin = 4) {
-  return Math.max(margin, Math.min(value, Math.max(margin, viewportSize - size - margin)));
+  return Math.max(
+    margin,
+    Math.min(value, Math.max(margin, viewportSize - size - margin)),
+  );
 }
 
 /**
@@ -394,19 +495,22 @@ function clampPlacementCoordinate(value, size, viewportSize, margin = 4) {
  * @param {Array<object>} [out]
  * @returns {Array<object>}
  */
-export function placementVariants({
-  anchorX,
-  anchorY,
-  width,
-  height,
-  viewportWidth,
-  viewportHeight,
-  gap = 12,
-  preferred = 'auto',
-  leaderOffset = 0,
-  verticalOnly = false,
-  viewportMargin = 4,
-}, out = []) {
+export function placementVariants(
+  {
+    anchorX,
+    anchorY,
+    width,
+    height,
+    viewportWidth,
+    viewportHeight,
+    gap = 12,
+    preferred = 'auto',
+    leaderOffset = 0,
+    verticalOnly = false,
+    viewportMargin = 4,
+  },
+  out = [],
+) {
   const automatic = anchorY - gap - height >= 4 ? 'above' : 'below';
   const orders = verticalOnly ? VERTICAL_PLACEMENT_ORDERS : PLACEMENT_ORDERS;
   const order = orders[preferred] || orders[automatic];
@@ -437,40 +541,108 @@ export function placementVariants({
       height,
       anchorX,
       anchorY,
-      corner === 'above' || corner === 'left' ? negativeLeaderOffset : positiveLeaderOffset,
+      corner === 'above' || corner === 'left'
+        ? negativeLeaderOffset
+        : positiveLeaderOffset,
     );
   }
   out.length = order.length;
   return out;
 }
 
-function drawLeader(ctx, placement, accent) {
+function drawLeader(
+  ctx,
+  placement,
+  accent,
+  progress = 1,
+  width = 1,
+  style = 'straight',
+) {
+  const reveal = Math.max(0, Math.min(1, Number(progress) || 0));
+  if (reveal <= 0) return;
   ctx.strokeStyle = accent || WORLD_OVERLAY_STYLE.leader;
   // Leaders are screen-space strokes. Card content may be painted inside an
   // altitude/distance scale transform, so counter-scale the canvas width to
   // retain the shipped one-CSS-pixel leader at every card size.
-  ctx.lineWidth = 1 / (placement.paintScale || 1);
-  ctx.beginPath();
-  if (placement.leaderOffset === 0) {
-    ctx.moveTo(placement.leadFromX, placement.leadFromY);
-  } else if (placement.corner === 'above' || placement.corner === 'below') {
-    ctx.moveTo(placement.leadFromX, placement.leadFromY + placement.leaderOffset);
-  } else {
-    ctx.moveTo(placement.leadFromX + placement.leaderOffset, placement.leadFromY);
+  ctx.lineWidth = width / (placement.paintScale || 1);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  let startX = placement.leadFromX;
+  let startY = placement.leadFromY;
+  if (placement.leaderOffset !== 0) {
+    if (placement.corner === 'above' || placement.corner === 'below') {
+      startY += placement.leaderOffset;
+    } else {
+      startX += placement.leaderOffset;
+    }
   }
-  ctx.lineTo(placement.leadToX, placement.leadToY);
+  ctx.beginPath();
+  ctx.moveTo(startX, startY);
+  if (
+    style === 'elbow' &&
+    (placement.corner === 'left' || placement.corner === 'right')
+  ) {
+    const elbowY =
+      placement.rect.y + Math.min(Math.max(12, placement.rect.h * 0.12), 26);
+    const verticalLength = Math.abs(elbowY - startY);
+    const horizontalLength = Math.abs(placement.leadToX - startX);
+    const totalLength = verticalLength + horizontalLength;
+    const visibleLength = totalLength * reveal;
+    if (visibleLength <= verticalLength && verticalLength > 0) {
+      const direction = Math.sign(elbowY - startY);
+      ctx.lineTo(startX, startY + visibleLength * direction);
+    } else {
+      ctx.lineTo(startX, elbowY);
+      const remaining = Math.max(0, visibleLength - verticalLength);
+      const direction = Math.sign(placement.leadToX - startX);
+      ctx.lineTo(
+        startX + Math.min(horizontalLength, remaining) * direction,
+        elbowY,
+      );
+    }
+    ctx.stroke();
+    return;
+  }
+  ctx.lineTo(
+    startX + (placement.leadToX - startX) * reveal,
+    startY + (placement.leadToY - startY) * reveal,
+  );
   ctx.stroke();
 }
 
-function drawCardChrome(ctx, entry, placement, selected = false) {
+function drawAnchorDot(ctx, entry, placement) {
+  if (!entry.anchorDot) return;
+  const paintScale = placement.paintScale || 1;
+  const radius = WORLD_OVERLAY_STYLE.anchorDotRadius / paintScale;
+  ctx.beginPath();
+  ctx.arc(placement.anchorX, placement.anchorY, radius, 0, Math.PI * 2);
+  ctx.fillStyle = entry.accent || WORLD_OVERLAY_STYLE.accent;
+  ctx.fill();
+  ctx.strokeStyle = WORLD_OVERLAY_STYLE.anchorDotStroke;
+  ctx.lineWidth = WORLD_OVERLAY_STYLE.anchorDotStrokeWidth / paintScale;
+  ctx.stroke();
+}
+
+function drawCardChrome(
+  ctx,
+  entry,
+  placement,
+  selected = false,
+  drawLeaderLine = true,
+) {
   const { x, y, w, h } = placement.rect;
   const accent = entry.accent || WORLD_OVERLAY_STYLE.accent;
-  drawLeader(ctx, placement, accent);
+  if (drawLeaderLine)
+    drawLeader(ctx, placement, accent, 1, 1, entry.leaderStyle);
   ctx.beginPath();
   roundedRectPath(ctx, x, y, w, h);
-  ctx.fillStyle = selected ? WORLD_OVERLAY_STYLE.selectedBackground : WORLD_OVERLAY_STYLE.background;
+  ctx.fillStyle = selected
+    ? WORLD_OVERLAY_STYLE.selectedBackground
+    : WORLD_OVERLAY_STYLE.background;
   ctx.fill();
-  ctx.strokeStyle = selected ? WORLD_OVERLAY_STYLE.selectedBorder : WORLD_OVERLAY_STYLE.border;
+  ctx.strokeStyle = selected
+    ? WORLD_OVERLAY_STYLE.selectedBorder
+    : WORLD_OVERLAY_STYLE.border;
   ctx.lineWidth = selected ? 1.25 : 1;
   ctx.stroke();
   ctx.fillStyle = accent;
@@ -482,7 +654,9 @@ function drawCardText(ctx, entry, placement, selected = false, topOffset = 0) {
   const x = placement.rect.x + (selected ? 12 : 9);
   let y = placement.rect.y + (selected ? 8 : 6) + topOffset;
   ctx.fillStyle = WORLD_OVERLAY_STYLE.title;
-  ctx.font = selected ? WORLD_OVERLAY_STYLE.fontSelected : WORLD_OVERLAY_STYLE.fontTitle;
+  ctx.font = selected
+    ? WORLD_OVERLAY_STYLE.fontSelected
+    : WORLD_OVERLAY_STYLE.fontTitle;
   ctx.textBaseline = 'top';
   ctx.fillText(String(entry.title || ''), x, y);
   y += selected ? 15 : 13;
@@ -497,7 +671,8 @@ function drawCardText(ctx, entry, placement, selected = false, topOffset = 0) {
 function colorWithAlpha(color, alpha) {
   const text = String(color || WORLD_OVERLAY_STYLE.accent).trim();
   const triplet = text.match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
-  if (triplet) return `rgba(${triplet[1]}, ${triplet[2]}, ${triplet[3]}, ${alpha})`;
+  if (triplet)
+    return `rgba(${triplet[1]}, ${triplet[2]}, ${triplet[3]}, ${alpha})`;
   const hex = text.match(/^#([0-9a-f]{6})$/i);
   if (hex) {
     const value = Number.parseInt(hex[1], 16);
@@ -521,6 +696,105 @@ function tacticalAccentColors(entry) {
   return colors;
 }
 
+function animationLinearProgress(entry, timestamp) {
+  const duration = Math.max(0, Number(entry?.leaderAnimationMs) || 0);
+  if (!duration) return 1;
+  const startedAt = Number(entry?.leaderAnimationStartedAt);
+  if (!Number.isFinite(startedAt)) return 1;
+  return Math.max(0, Math.min(1, (timestamp - startedAt) / duration));
+}
+
+function leaderDrawRatio(entry) {
+  const ratio = Number(entry?.leaderDrawRatio);
+  return Number.isFinite(ratio) ? Math.max(0.1, Math.min(0.9, ratio)) : 0.68;
+}
+
+/** Now, for a reveal given no time. Not a parameter default: an optional
+ * method call in a default parameter is compiled for older browsers into code
+ * that throws (esbuild). */
+function revealNow() {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+export function leaderRevealProgress(entry, timestamp) {
+  const at = timestamp === undefined ? revealNow() : timestamp;
+  const linear = Math.min(
+    1,
+    animationLinearProgress(entry, at) / leaderDrawRatio(entry),
+  );
+  return 1 - Math.pow(1 - linear, 3);
+}
+
+export function tacticalCardRevealAlpha(entry, timestamp) {
+  if (!(Math.max(0, Number(entry?.leaderAnimationMs) || 0) > 0)) return 1;
+  const at = timestamp === undefined ? revealNow() : timestamp;
+  const start = leaderDrawRatio(entry);
+  const linear = Math.max(
+    0,
+    Math.min(
+      1,
+      (animationLinearProgress(entry, at) - start) / Math.max(0.1, 1 - start),
+    ),
+  );
+  return linear * linear * (3 - 2 * linear);
+}
+
+function drawTacticalLeader(ctx, entry, placement, accent, timestamp) {
+  ctx.strokeStyle = accent;
+  ctx.lineWidth =
+    (entry.leaderStyle === 'elbow' ? 1.5 : 1) / (placement.paintScale || 1);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  if (
+    entry.leaderStyle !== 'elbow' ||
+    (placement.corner !== 'above' && placement.corner !== 'below')
+  ) {
+    if (placement.leaderOffset === 0) {
+      ctx.moveTo(placement.leadFromX, placement.leadFromY);
+    } else if (placement.corner === 'above' || placement.corner === 'below') {
+      ctx.moveTo(
+        placement.leadFromX,
+        placement.leadFromY + placement.leaderOffset,
+      );
+    } else {
+      ctx.moveTo(
+        placement.leadFromX + placement.leaderOffset,
+        placement.leadFromY,
+      );
+    }
+    ctx.lineTo(placement.leadToX, placement.leadToY);
+    ctx.stroke();
+    return;
+  }
+
+  const { x, y, w, h } = placement.rect;
+  const cardX = x + Math.max(18, Math.min(w - 18, w * 0.22));
+  const cardY = placement.corner === 'above' ? y + h : y;
+  const anchorRadius = Math.abs(placement.leaderOffset);
+  const anchorX = placement.leadFromX - anchorRadius;
+  const anchorY = placement.leadFromY;
+  const horizontalLength = Math.abs(anchorX - cardX);
+  const verticalLength = Math.abs(anchorY - cardY);
+  let remaining =
+    leaderRevealProgress(entry, timestamp) *
+    (horizontalLength + verticalLength);
+  ctx.moveTo(anchorX, anchorY);
+  if (remaining <= horizontalLength) {
+    const direction = Math.sign(cardX - anchorX) || -1;
+    ctx.lineTo(anchorX + direction * remaining, anchorY);
+  } else {
+    ctx.lineTo(cardX, anchorY);
+    remaining -= horizontalLength;
+    const direction = Math.sign(cardY - anchorY) || -1;
+    ctx.lineTo(
+      cardX,
+      anchorY + direction * Math.min(verticalLength, remaining),
+    );
+  }
+  ctx.stroke();
+}
+
 /** Paint the legacy FIRMS/vessel tactical card inside the shared host. */
 export function paintTacticalCard(ctx, entry, placement, alpha = 1) {
   const selected = entry.selected || entry.variant === 'selected';
@@ -528,21 +802,21 @@ export function paintTacticalCard(ctx, entry, placement, alpha = 1) {
   const layout = entry._overlayLayout || {};
   const { x, y, w, h } = placement.rect;
   const accentColors = tacticalAccentColors(entry);
+  const animationTimestamp = globalThis.performance?.now?.() ?? Date.now();
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  ctx.strokeStyle = accentColors.leader;
-  ctx.lineWidth = 1 / (placement.paintScale || 1);
-  ctx.beginPath();
-  if (placement.leaderOffset === 0) {
-    ctx.moveTo(placement.leadFromX, placement.leadFromY);
-  } else if (placement.corner === 'above' || placement.corner === 'below') {
-    ctx.moveTo(placement.leadFromX, placement.leadFromY + placement.leaderOffset);
-  } else {
-    ctx.moveTo(placement.leadFromX + placement.leaderOffset, placement.leadFromY);
-  }
-  ctx.lineTo(placement.leadToX, placement.leadToY);
-  ctx.stroke();
+  drawTacticalLeader(
+    ctx,
+    entry,
+    placement,
+    entry.leaderStyle === 'elbow'
+      ? colorWithAlpha(entry.accent, 0.95)
+      : accentColors.leader,
+    animationTimestamp,
+  );
+
+  ctx.globalAlpha = alpha * tacticalCardRevealAlpha(entry, animationTimestamp);
 
   ctx.beginPath();
   roundedRectPath(ctx, x, y, w, h, 4);
@@ -563,13 +837,19 @@ export function paintTacticalCard(ctx, entry, placement, alpha = 1) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = WORLD_OVERLAY_STYLE.title;
-  ctx.font = selected ? WORLD_OVERLAY_STYLE.fontSelected : WORLD_OVERLAY_STYLE.fontTitle;
+  ctx.font = selected
+    ? WORLD_OVERLAY_STYLE.fontSelected
+    : WORLD_OVERLAY_STYLE.fontTitle;
   const titleBaseline = y + layout.padY + layout.titleH - 2;
   ctx.fillText(String(entry.title || ''), x + layout.padX, titleBaseline);
   ctx.fillStyle = WORLD_OVERLAY_STYLE.detail;
   ctx.font = WORLD_OVERLAY_STYLE.fontDetail;
   for (let i = 0; i < details.length; i++) {
-    ctx.fillText(String(details[i]), x + layout.padX, titleBaseline + (i + 1) * layout.lineH);
+    ctx.fillText(
+      String(details[i]),
+      x + layout.padX,
+      titleBaseline + (i + 1) * layout.lineH,
+    );
   }
   ctx.restore();
   return placement.rect;
@@ -583,7 +863,11 @@ export function paintLabel(ctx, entry, placement, alpha = 1) {
   ctx.fillStyle = WORLD_OVERLAY_STYLE.title;
   ctx.font = WORLD_OVERLAY_STYLE.fontLabel;
   ctx.textBaseline = 'top';
-  ctx.fillText(String(entry.title || ''), placement.rect.x + 6, placement.rect.y + 4);
+  ctx.fillText(
+    String(entry.title || ''),
+    placement.rect.x + 6,
+    placement.rect.y + 4,
+  );
   ctx.restore();
   return placement.rect;
 }
@@ -605,18 +889,79 @@ export function paintTrack(ctx, entry, placement, alpha = 1) {
   return placement.rect;
 }
 
-/** Paint a standard detail card. */
-export function paintCard(ctx, entry, placement, alpha = 1) {
+/** Paint a standard detail card, with an opt-in staged anchor/leader reveal. */
+export function paintCard(
+  ctx,
+  entry,
+  placement,
+  alpha = 1,
+  leaderProgress = 1,
+  contentAlpha = 1,
+) {
   ctx.save();
   ctx.globalAlpha = alpha;
-  drawCardChrome(ctx, entry, placement, false);
+  if (entry.anchorDot) {
+    drawLeader(
+      ctx,
+      placement,
+      entry.accent || WORLD_OVERLAY_STYLE.accent,
+      leaderProgress,
+      WORLD_OVERLAY_STYLE.leaderWidth,
+      entry.leaderStyle,
+    );
+    drawAnchorDot(ctx, entry, placement);
+    ctx.globalAlpha =
+      alpha * Math.max(0, Math.min(1, Number(contentAlpha) || 0));
+    drawCardChrome(ctx, entry, placement, false, false);
+  } else {
+    drawCardChrome(ctx, entry, placement, false);
+  }
   drawCardText(ctx, entry, placement, false);
   ctx.restore();
   return placement.rect;
 }
 
+/** Bound a title by code points, preferring a whole word before the ellipsis. */
+export function truncateOverlayTitle(value, maxChars) {
+  const text = String(value ?? '');
+  if (text.length <= maxChars) return text;
+  const glyphs = Array.from(text);
+  if (glyphs.length <= maxChars) return text;
+  const length = Math.max(0, maxChars - 1);
+  const prefix = glyphs.slice(0, length).join('');
+  const atBoundary = /\s$/u.test(prefix) || /\s/u.test(glyphs[length] || '');
+  const words = atBoundary
+    ? prefix.trimEnd()
+    : prefix.replace(/\s+\S*$/u, '').trimEnd();
+  return `${words || prefix.trimEnd()}…`;
+}
+
+function fitThumbnailText(ctx, value, font, maxWidth, wordBoundary = false) {
+  const text = String(value ?? '');
+  if (measureWorldOverlayText(ctx, text, font) <= maxWidth) return text;
+  const glyphs = Array.from(text);
+  let low = 0;
+  let high = glyphs.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = `${glyphs.slice(0, mid).join('')}…`;
+    if (measureWorldOverlayText(ctx, candidate, font) <= maxWidth) low = mid;
+    else high = mid - 1;
+  }
+  return wordBoundary
+    ? truncateOverlayTitle(text, low + 1)
+    : `${glyphs.slice(0, low).join('')}…`;
+}
+
 /** Paint a thumbnail card. The image slot remains source-owned. */
-export function paintThumbnail(ctx, entry, placement, alpha = 1) {
+export function paintThumbnail(
+  ctx,
+  entry,
+  placement,
+  alpha = 1,
+  leaderProgress = 1,
+  contentAlpha = 1,
+) {
   const layout = entry._overlayLayout || {};
   const { x, y, w, h } = placement.rect;
   const padX = Number.isFinite(layout.padX) ? layout.padX : 4;
@@ -624,21 +969,53 @@ export function paintThumbnail(ctx, entry, placement, alpha = 1) {
   const thumbW = layout.thumbW || Number(entry.thumbnailWidth) || 96;
   const thumbH = layout.thumbH || Number(entry.thumbnailHeight) || 54;
   const titleH = Number.isFinite(layout.titleH) ? layout.titleH : 13;
+  const details = Array.isArray(entry.details) ? entry.details : [];
   const image = entry.image?.frame ?? entry.image;
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  drawLeader(ctx, placement, entry.thumbnailLeaderColor || WORLD_OVERLAY_STYLE.leader);
-  ctx.beginPath();
-  roundedRectPath(ctx, x, y, w, h, Number(entry.thumbnailRadius) || 4);
-  ctx.fillStyle = entry.thumbnailBackground || WORLD_OVERLAY_STYLE.background;
-  ctx.fill();
+  drawLeader(
+    ctx,
+    placement,
+    entry.thumbnailLeaderColor || WORLD_OVERLAY_STYLE.leader,
+    leaderProgress,
+    entry.anchorDot ? WORLD_OVERLAY_STYLE.leaderWidth : 1,
+    entry.leaderStyle,
+  );
+  drawAnchorDot(ctx, entry, placement);
+  ctx.globalAlpha = alpha * Math.max(0, Math.min(1, Number(contentAlpha) || 0));
+  if (entry.selected) {
+    drawCardChrome(ctx, entry, placement, true, false);
+  } else {
+    ctx.beginPath();
+    roundedRectPath(ctx, x, y, w, h, Number(entry.thumbnailRadius) || 4);
+    ctx.fillStyle = entry.thumbnailBackground || WORLD_OVERLAY_STYLE.background;
+    ctx.fill();
+  }
 
   const imageX = x + padX;
   const imageY = y + padY;
   if (image && typeof ctx.drawImage === 'function') {
     try {
-      ctx.drawImage(image, imageX, imageY, thumbW, thumbH);
+      const sourceW = Number(
+        image.naturalWidth || image.videoWidth || image.width,
+      );
+      const sourceH = Number(
+        image.naturalHeight || image.videoHeight || image.height,
+      );
+      const scale =
+        entry.thumbnailFit === 'contain' && sourceW > 0 && sourceH > 0
+          ? Math.min(thumbW / sourceW, thumbH / sourceH)
+          : null;
+      const width = scale == null ? thumbW : sourceW * scale;
+      const height = scale == null ? thumbH : sourceH * scale;
+      ctx.drawImage(
+        image,
+        imageX + (thumbW - width) / 2,
+        imageY + (thumbH - height) / 2,
+        width,
+        height,
+      );
     } catch {
       // A source may replace/close a live image slot between frames. Chrome
       // and text remain valid; the next source update supplies the next frame.
@@ -649,22 +1026,57 @@ export function paintThumbnail(ctx, entry, placement, alpha = 1) {
   if (ruleHeight > 0) {
     ctx.beginPath();
     roundedRectPath(ctx, x, y, w, ruleHeight, Math.min(1, ruleHeight));
-    ctx.fillStyle = entry.thumbnailRuleColor || entry.accent || WORLD_OVERLAY_STYLE.accent;
+    ctx.fillStyle =
+      entry.thumbnailRuleColor || entry.accent || WORLD_OVERLAY_STYLE.accent;
     ctx.fill();
   }
 
-  const titleChars = Math.max(0, Math.floor(Number(entry.thumbnailTitleChars) || 0));
-  const title = entry._overlayThumbnailTitle
-    || String(entry.title || '').toUpperCase();
+  const titleChars = Math.max(
+    0,
+    Math.floor(Number(entry.thumbnailTitleChars) || 0),
+  );
+  const title =
+    entry._overlayThumbnailTitle || String(entry.title || '').toUpperCase();
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = entry.thumbnailTitleColor || WORLD_OVERLAY_STYLE.title;
   ctx.font = entry.thumbnailTitleFont || WORLD_OVERLAY_STYLE.fontTitle;
-  ctx.fillText(
-    titleChars > 0 ? title.slice(0, titleChars) : title,
-    imageX,
-    imageY + thumbH + titleH - 3,
-  );
+  if (title && titleH > 0) {
+    const label =
+      titleChars > 0
+        ? entry.thumbnailTitleWordBoundary
+          ? truncateOverlayTitle(title, titleChars)
+          : title.slice(0, titleChars)
+        : title;
+    ctx.fillText(
+      entry.thumbnailFixedWidth === true
+        ? fitThumbnailText(
+            ctx,
+            label,
+            ctx.font,
+            thumbW,
+            entry.thumbnailTitleWordBoundary,
+          )
+        : label,
+      imageX,
+      imageY + thumbH + titleH - 3,
+    );
+  }
+  if (details.length) {
+    ctx.fillStyle = WORLD_OVERLAY_STYLE.detail;
+    ctx.font = WORLD_OVERLAY_STYLE.fontDetail;
+    const lineH = Number.isFinite(layout.lineH) ? layout.lineH : 13;
+    const titleGap = Number.isFinite(layout.titleGap) ? layout.titleGap : 0;
+    for (let i = 0; i < details.length; i++) {
+      ctx.fillText(
+        entry.thumbnailFixedWidth === true
+          ? fitThumbnailText(ctx, details[i], ctx.font, thumbW)
+          : details[i],
+        imageX,
+        imageY + thumbH + titleGap + titleH + (i + 1) * lineH - 3,
+      );
+    }
+  }
   ctx.restore();
   return placement.rect;
 }
@@ -687,7 +1099,7 @@ export function paintTracked(ctx, entry, placement, alpha = 1) {
   const accent = entry.accent || WORLD_OVERLAY_STYLE.accent;
   ctx.save();
   ctx.globalAlpha = alpha;
-  drawLeader(ctx, placement, accent);
+  drawLeader(ctx, placement, accent, 1, 1, entry.leaderStyle);
   ctx.beginPath();
   roundedRectPath(ctx, x, y, w, h, 5);
   ctx.fillStyle = WORLD_OVERLAY_STYLE.background;
@@ -707,7 +1119,11 @@ export function paintTracked(ctx, entry, placement, alpha = 1) {
   ctx.fillStyle = WORLD_OVERLAY_STYLE.detail;
   ctx.font = WORLD_OVERLAY_STYLE.fontTrackedDetail;
   for (let i = 0; i < details.length; i++) {
-    ctx.fillText(String(details[i]), centerX, titleBaseline + (i + 1) * layout.lineH);
+    ctx.fillText(
+      String(details[i]),
+      centerX,
+      titleBaseline + (i + 1) * layout.lineH,
+    );
   }
   ctx.restore();
   return placement.rect;
@@ -780,7 +1196,8 @@ export function paintDetectionCallout(ctx, callout, alpha = 1) {
   ctx.globalAlpha = alpha;
   ctx.fillStyle = callout.label;
   ctx.font = callout.font;
-  if (callout.primary) ctx.fillText(callout.primary, callout.primaryX, callout.baseline);
+  if (callout.primary)
+    ctx.fillText(callout.primary, callout.primaryX, callout.baseline);
   if (callout.micro) {
     ctx.globalAlpha = alpha * 0.8;
     ctx.font = callout.microFont;
@@ -789,12 +1206,41 @@ export function paintDetectionCallout(ctx, callout, alpha = 1) {
 }
 
 /** Dispatch a normalized entry to its pure variant painter. */
-export function paintOverlayEntry(ctx, entry, placement, alpha = 1) {
-  if (entry.cardStyle === 'tactical') return paintTacticalCard(ctx, entry, placement, alpha);
-  if (entry.variant === 'tracked') return paintTracked(ctx, entry, placement, alpha);
-  if (entry.selected || entry.variant === 'selected') return paintSelected(ctx, entry, placement, alpha);
-  if (entry.variant === 'thumbnail') return paintThumbnail(ctx, entry, placement, alpha);
-  if (entry.variant === 'card') return paintCard(ctx, entry, placement, alpha);
-  if (entry.variant === 'track') return paintTrack(ctx, entry, placement, alpha);
+export function paintOverlayEntry(
+  ctx,
+  entry,
+  placement,
+  alpha = 1,
+  leaderProgress = 1,
+  contentAlpha = 1,
+) {
+  if (entry.cardStyle === 'tactical')
+    return paintTacticalCard(ctx, entry, placement, alpha);
+  if (entry.variant === 'tracked')
+    return paintTracked(ctx, entry, placement, alpha);
+  if (entry.variant === 'thumbnail') {
+    return paintThumbnail(
+      ctx,
+      entry,
+      placement,
+      alpha,
+      leaderProgress,
+      contentAlpha,
+    );
+  }
+  if (entry.selected || entry.variant === 'selected')
+    return paintSelected(ctx, entry, placement, alpha);
+  if (entry.variant === 'card') {
+    return paintCard(
+      ctx,
+      entry,
+      placement,
+      alpha,
+      leaderProgress,
+      contentAlpha,
+    );
+  }
+  if (entry.variant === 'track')
+    return paintTrack(ctx, entry, placement, alpha);
   return paintLabel(ctx, entry, placement, alpha);
 }

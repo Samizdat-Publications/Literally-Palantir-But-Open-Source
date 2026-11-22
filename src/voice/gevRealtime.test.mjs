@@ -2,9 +2,12 @@
 // These helpers are DOM/WebRTC-free so they pin the screenshot down-scaling and
 // payload-byte estimation that keep an oversized dc.send from stranding a turn.
 import { test } from 'node:test';
+import { bindRenderer } from '../render/rendererOf.js';
+import { fakeSceneFrame } from '../testSupport/fakeCesiumScene.mjs';
 import assert from 'node:assert/strict';
 import { DataLayerManager } from '../data/manager.js';
-import { controlRadio, createGevActionRunner } from './gevActions.js';
+import { controlRadio as runControlRadio, createGevActionRunner as createActionRunner } from './gevActions.js';
+import { createStandalonePlaceSearch } from '../standalone/placeSearch.js';
 import {
   computeDownscale,
   renderFreshCesiumFrame,
@@ -12,7 +15,11 @@ import {
   GevRealtimeController,
   gateVoiceVisualizerLevel,
   isBenignViewportDeleteError,
+  isEditingSpaceTarget,
+  isInteractiveSpaceTarget,
   isPushToTalkKey,
+  isPushToTalkSurface,
+  PUSH_TO_TALK_HOLD_DELAY_MS,
   resolveVoiceControlHint,
   resolveVoiceVisualizerSpeaker,
   selectVoiceVisualizerSignal,
@@ -26,27 +33,482 @@ import {
   readStoredVoiceLimits,
   writeStoredVoiceTier,
   writeStoredVoiceLimits,
+  withToolCatalog,
 } from './gevRealtime.js';
 import { createVoiceCostTracker } from './voiceCost.js';
+import { createTestVoiceUi } from '../testSupport/voiceUi.mjs';
+import { setLocale, t } from '../i18n/index.js';
+
+
+/** A viewer over `scene` whose renderer's frame port is the scene's own loop. */
+function framed(scene) {
+  const viewer = { scene };
+  bindRenderer(viewer, { frame: fakeSceneFrame(viewer) });
+  return viewer;
+}
 
 test('push-to-talk recognizes Space by code or key', () => {
+  assert.equal(PUSH_TO_TALK_HOLD_DELAY_MS, 500);
   assert.equal(isPushToTalkKey({ code: 'Space', key: 'Unidentified' }), true);
   assert.equal(isPushToTalkKey({ code: '', key: ' ' }), true);
   assert.equal(isPushToTalkKey({ code: 'KeyM', key: 'm' }), false);
 });
 
-test('push-to-talk ignores typing targets and modified shortcuts', () => {
+test('push-to-talk protects text entry but arbitrates non-editing controls', () => {
   const plainTarget = { isContentEditable: false, closest: () => null };
   assert.equal(shouldHandlePushToTalkKeyDown({ code: 'Space', target: plainTarget }), true);
   assert.equal(shouldHandlePushToTalkKeyDown({ code: 'Space', target: plainTarget, metaKey: true }), false);
   assert.equal(shouldHandlePushToTalkKeyDown({
     code: 'Space',
-    target: { isContentEditable: false, closest: () => ({ tagName: 'INPUT' }) },
+    target: pushToTalkTarget({ tagName: 'INPUT', type: 'text' }),
   }), false);
   assert.equal(shouldHandlePushToTalkKeyDown({
     code: 'Space',
     target: { isContentEditable: true, closest: () => null },
   }), false);
+  assert.equal(shouldHandlePushToTalkKeyDown({
+    code: 'Space',
+    target: pushToTalkTarget({ tagName: 'BUTTON' }),
+  }), true);
+  assert.equal(isEditingSpaceTarget(pushToTalkTarget({ tagName: 'INPUT', type: 'range' })), false);
+});
+
+// Dispatch through the installed document/window listeners, keeping WebRTC at
+// the start boundary. Native button activation itself belongs to browser QA.
+function createPushToTalkFixture(t) {
+  const savedGlobals = new Map(['document', 'window', 'setTimeout', 'clearTimeout'].map((name) => (
+    [name, Object.getOwnPropertyDescriptor(globalThis, name)]
+  )));
+  const eventHub = () => {
+    const listeners = new Map();
+    return {
+      addEventListener(type, listener) {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type).add(listener);
+      },
+      removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+      dispatch(type, event = {}) {
+        for (const listener of listeners.get(type) || []) listener(event);
+        return event;
+      },
+      count(type) { return listeners.get(type)?.size || 0; },
+    };
+  };
+  let clock = 0;
+  let nextTimerId = 1;
+  const timers = new Map();
+  const setTimeout = (callback, delay = 0) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, due: clock + Number(delay || 0) });
+    return id;
+  };
+  const clearTimeout = (id) => timers.delete(id);
+  const advance = (milliseconds) => {
+    const end = clock + milliseconds;
+    while (true) {
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.due <= end)
+        .sort((a, b) => a[1].due - b[1].due || a[0] - b[0])[0];
+      if (!due) break;
+      const [id, timer] = due;
+      timers.delete(id);
+      clock = timer.due;
+      timer.callback();
+    }
+    clock = end;
+  };
+  const document = { ...eventHub(), visibilityState: 'visible', activeElement: null };
+  const window = eventHub();
+  Object.assign(globalThis, { document, window, setTimeout, clearTimeout });
+  const starts = [];
+  const radio = [];
+  const controllers = [];
+  const makeController = () => {
+    const microphone = { enabled: false, stopped: false, stop() { this.stopped = true; } };
+    const controller = new GevRealtimeController({
+      ui: createTestVoiceUi(),
+      runner: async () => ({}),
+      radioLayer: {
+        pause: () => radio.push('pause'),
+        setVoiceDucked: (ducked) => radio.push(ducked ? 'duck' : 'unduck'),
+      },
+    });
+    controller.debugLog = () => {};
+    controller.start = ({ pushToTalk }) => {
+      starts.push({ pushToTalk });
+      controller.pushToTalkMode = pushToTalk;
+      controller.status = 'listening';
+      controller.stream = {
+        getAudioTracks: () => [microphone],
+        getTracks: () => [microphone],
+      };
+      controller.setMicrophoneEnabled(true);
+    };
+    controllers.push(controller);
+    controller.bindPushToTalkShortcut();
+    return { controller, microphone };
+  };
+  t.after(() => {
+    for (const controller of controllers) controller.stop({ removeUi: true });
+    for (const [name, descriptor] of savedGlobals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  });
+  const key = (type, target, options = {}) => {
+    document.activeElement = options.activeElement === undefined ? target : options.activeElement;
+    return document.dispatch(type, {
+    code: 'Space', key: ' ', target, defaultPrevented: false,
+    preventDefault() { this.defaultPrevented = true; },
+    ...options,
+    });
+  };
+  return { advance, document, window, starts, radio, key, makeController, timers, ...makeController() };
+}
+
+function pushToTalkTarget({
+  tagName = null,
+  id = null,
+  style = null,
+  parentElement = null,
+  role = null,
+  tabIndex = null,
+  href = null,
+  controls = false,
+  type = null,
+  contentEditable = false,
+  mapSurface = false,
+} = {}) {
+  const resolvedTagName = (tagName || (style ? 'BUTTON' : 'DIV')).toUpperCase();
+  return {
+    tagName: resolvedTagName,
+    id,
+    style,
+    parentElement,
+    role,
+    tabIndex,
+    href,
+    controls,
+    type,
+    blurred: 0,
+    blur() { this.blurred += 1; },
+    isContentEditable: contentEditable,
+    closest(selector) {
+      for (let node = this; node; node = node.parentElement) {
+        if (selector === '#cesiumContainer' && (node.id === 'cesiumContainer' || node.mapSurface)) {
+          return node;
+        }
+        for (const part of selector.split(/,\s*/)) {
+          if (part.toUpperCase() === node.tagName) return node;
+          if (part === 'a[href]' && node.tagName === 'A' && node.href !== null) return node;
+          if (part === 'audio[controls]' && node.tagName === 'AUDIO' && node.controls) return node;
+          if (part === 'video[controls]' && node.tagName === 'VIDEO' && node.controls) return node;
+          if (part === '[contenteditable]' && node.isContentEditable) return node;
+          if (part === '[tabindex]' && node.tabIndex !== null) return node;
+          const roleMatch = part.match(/^\[role="([^"]+)"\]$/);
+          if (roleMatch && node.role === roleMatch[1]) return node;
+        }
+      }
+      return null;
+    },
+    mapSurface,
+  };
+}
+
+test('push-to-talk starts from Cesium canvases and the document background', (t) => {
+  const f = createPushToTalkFixture(t);
+  const cesiumContainer = pushToTalkTarget({ tagName: 'DIV', id: 'cesiumContainer' });
+  const cesiumCanvas = pushToTalkTarget({
+    tagName: 'CANVAS',
+    tabIndex: 0,
+    parentElement: cesiumContainer,
+  });
+  const overlayCanvas = pushToTalkTarget({
+    tagName: 'CANVAS',
+    id: 'world-overlay-canvas',
+    tabIndex: 0,
+  });
+
+  for (const [index, canvas] of [cesiumCanvas, overlayCanvas].entries()) {
+    assert.equal(isPushToTalkSurface(canvas), true);
+    assert.equal(isInteractiveSpaceTarget(canvas), false);
+    assert.equal(f.key('keydown', canvas).defaultPrevented, true);
+    f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+    assert.equal(f.starts.length, 1, 'the first map hold opens one reusable voice session');
+    assert.equal(f.controller.pushToTalkKeyHeld, true);
+    assert.equal(f.microphone.enabled, true, `map hold ${index + 1} enables the microphone`);
+    assert.equal(f.key('keyup', canvas).defaultPrevented, true);
+    assert.equal(f.microphone.enabled, false, `map release ${index + 1} mutes the microphone`);
+  }
+  const background = pushToTalkTarget();
+  assert.equal(f.key('keydown', background).defaultPrevented, true);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.controller.pushToTalkKeyHeld, true);
+  assert.equal(f.key('keyup', background).defaultPrevented, true);
+});
+
+test('short Space on a focused control preserves release activation', (t) => {
+  const f = createPushToTalkFixture(t);
+  const button = pushToTalkTarget({ tagName: 'BUTTON' });
+  let activations = 0;
+  assert.equal(f.key('keydown', button).defaultPrevented, false);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS - 1);
+  const release = f.key('keyup', button);
+  if (!release.defaultPrevented) activations += 1;
+  assert.equal(release.defaultPrevented, false);
+  assert.equal(activations, 1);
+  assert.equal(button.blurred, 0);
+  assert.deepEqual(f.starts, []);
+});
+
+test('long Space blurs a focused control before voice and consumes release', (t) => {
+  const f = createPushToTalkFixture(t);
+  const button = pushToTalkTarget({ tagName: 'BUTTON' });
+  const order = [];
+  button.blur = () => {
+    button.blurred += 1;
+    order.push('blur');
+    f.document.activeElement = null;
+  };
+  f.controller.pauseRadioForVoice = () => order.push('voice');
+  assert.equal(f.key('keydown', button).defaultPrevented, false);
+  assert.equal(f.key('keydown', button, { repeat: true }).defaultPrevented, false);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.deepEqual(order, ['blur', 'voice']);
+  assert.equal(button.blurred, 1);
+  assert.equal(f.controller.pushToTalkKeyHeld, true);
+  assert.equal(f.key('keydown', button, { repeat: true, activeElement: null }).defaultPrevented, true);
+  let activations = 0;
+  const release = f.key('keyup', button, { activeElement: null });
+  if (!release.defaultPrevented) activations += 1;
+  assert.equal(release.defaultPrevented, true);
+  assert.equal(activations, 0);
+  assert.equal(f.microphone.enabled, false);
+});
+
+test('push-to-talk still ignores modified, already-handled and typing keydowns', (t) => {
+  const f = createPushToTalkFixture(t);
+  const target = pushToTalkTarget();
+  for (const modifier of ['altKey', 'ctrlKey', 'metaKey', 'shiftKey']) {
+    assert.equal(f.key('keydown', target, { [modifier]: true }).defaultPrevented, false);
+  }
+  f.key('keydown', target, { defaultPrevented: true });
+  f.key('keydown', target, { code: 'Enter', key: 'Enter' });
+  for (const tagName of ['INPUT', 'TEXTAREA']) f.key('keydown', pushToTalkTarget({ tagName }));
+  f.key('keydown', pushToTalkTarget({ role: 'textbox' }));
+  f.key('keydown', { isContentEditable: true });
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.controller.spaceKeyHeld, false);
+});
+
+test('push-to-talk starts once at 500ms and repeat does not reset the threshold', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  assert.equal(f.key('keydown', background).defaultPrevented, true);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS - 1);
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.key('keydown', background, { repeat: true }).defaultPrevented, true);
+  f.advance(1);
+  assert.deepEqual(f.starts, [{ pushToTalk: true }]);
+  assert.equal(f.controller.pushToTalkKeyHeld, true);
+  assert.equal(f.microphone.enabled, true);
+  const radioAfterStart = f.radio.slice();
+  assert.equal(f.key('keydown', background, { repeat: true }).defaultPrevented, true);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS * 2);
+  assert.deepEqual(f.radio, radioAfterStart);
+  assert.equal(f.starts.length, 1);
+  assert.equal(
+    f.key('keyup', pushToTalkTarget({ tagName: 'BUTTON' })).defaultPrevented,
+    true,
+    'release follows a voice-owned hold after focus moves',
+  );
+  assert.equal(f.controller.spaceKeyHeld, false);
+  assert.equal(f.controller.pushToTalkKeyHeld, false);
+  assert.equal(f.microphone.enabled, false);
+  assert.equal(f.controller.ui.state.root.pushToTalk, null);
+  assert.equal(f.controller.ui.state.detail.text, 'Hold Space to talk');
+});
+
+test('push-to-talk treats a Space release before 500ms as a background tap', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  assert.equal(f.key('keydown', background).defaultPrevented, true);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS - 1);
+  assert.equal(f.key('keyup', background).defaultPrevented, true);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS + 1);
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.controller.spaceKeyHeld, false);
+  assert.equal(f.controller.pushToTalkKeyHeld, false);
+  assert.equal(f.timers.size, 0);
+});
+
+test('push-to-talk rechecks focus before the hold threshold claims voice', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  const control = pushToTalkTarget({ tagName: 'BUTTON' });
+  assert.equal(f.key('keydown', background).defaultPrevented, true);
+  f.document.activeElement = control;
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.key('keyup', control).defaultPrevented, true, 'release follows the background gesture owner');
+  assert.equal(f.controller.spaceKeyHeld, false);
+});
+
+test('opening Stories cancels a pending Space hold even when focus stays put', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  const classes = new Set();
+  f.document.body = { classList: { contains: (name) => classes.has(name) } };
+
+  f.key('keydown', background);
+  classes.add('stories-mode');
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.controller.spaceKeyHeld, false);
+  assert.equal(f.timers.size, 0);
+
+  classes.delete('stories-mode');
+  f.key('keydown', background);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.microphone.enabled, true);
+  f.key('keyup', background);
+  assert.equal(f.microphone.enabled, false);
+
+  f.key('keydown', background);
+  classes.add('stories-mode');
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.starts.length, 1);
+  assert.equal(f.microphone.enabled, false);
+});
+
+test('push-to-talk never claims a control-started hold after focus moves outside', (t) => {
+  const f = createPushToTalkFixture(t);
+  const control = pushToTalkTarget({ tagName: 'BUTTON' });
+  const background = pushToTalkTarget();
+  assert.equal(f.key('keydown', control).defaultPrevented, false);
+  assert.equal(f.key('keydown', background, { repeat: true }).defaultPrevented, false);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS + 1);
+  assert.equal(f.key('keyup', background).defaultPrevented, false);
+  assert.deepEqual(f.starts, []);
+  assert.deepEqual(f.radio, []);
+});
+
+test('push-to-talk cancels pending and active holds on blur or hidden document', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  for (const exit of ['blur', 'hidden']) {
+    const startsBeforePending = f.starts.length;
+    const radioBeforePending = f.radio.length;
+    f.key('keydown', background);
+    const staleCallback = [...f.timers.values()][0].callback;
+    if (exit === 'blur') f.window.dispatch('blur');
+    else {
+      f.document.visibilityState = 'hidden';
+      f.document.dispatch('visibilitychange');
+    }
+    staleCallback();
+    f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+    assert.equal(f.starts.length, startsBeforePending);
+    assert.equal(f.radio.length, radioBeforePending);
+    assert.equal(f.controller.spaceKeyHeld, false);
+    f.document.visibilityState = 'visible';
+
+    f.key('keydown', background);
+    f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+    assert.equal(f.microphone.enabled, true);
+    if (exit === 'blur') f.window.dispatch('blur');
+    else {
+      f.document.visibilityState = 'hidden';
+      f.document.dispatch('visibilitychange');
+    }
+    assert.equal(f.controller.spaceKeyHeld, false);
+    assert.equal(f.controller.pushToTalkKeyHeld, false);
+    assert.equal(f.microphone.enabled, false);
+    assert.equal(f.controller.ui.state.root.pushToTalk, null);
+    assert.equal(f.key('keyup', background).defaultPrevented, false);
+    f.document.visibilityState = 'visible';
+  }
+});
+
+test('push-to-talk timer refuses hidden or unfocused documents before lifecycle events arrive', (t) => {
+  const f = createPushToTalkFixture(t);
+  const background = pushToTalkTarget();
+  for (const state of ['hidden', 'unfocused']) {
+    f.key('keydown', background);
+    if (state === 'hidden') f.document.visibilityState = 'hidden';
+    else f.document.hasFocus = () => false;
+    f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+    assert.deepEqual(f.starts, []);
+    assert.deepEqual(f.radio, []);
+    assert.equal(f.key('keyup', background).defaultPrevented, true);
+    f.document.visibilityState = 'visible';
+    delete f.document.hasFocus;
+  }
+});
+
+test('focused controls and background Space preserve a click-started open mic', (t) => {
+  const f = createPushToTalkFixture(t);
+  f.controller.start({ pushToTalk: false });
+  f.starts.length = 0;
+  const style = pushToTalkTarget({ style: 'retro' });
+  f.key('keydown', style);
+  f.key('keydown', style, { repeat: true });
+  assert.equal(f.key('keyup', style).defaultPrevented, false);
+  assert.deepEqual(f.radio, []);
+  assert.equal(f.microphone.enabled, true);
+  assert.equal(f.controller.pushToTalkMode, false);
+  assert.equal(f.key('keydown', pushToTalkTarget()).defaultPrevented, true);
+  assert.equal(f.controller.spaceKeyHeld, true);
+  assert.equal(f.controller.pushToTalkKeyHeld, false);
+  assert.equal(f.timers.size, 0);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS + 1);
+  assert.equal(f.key('keyup', style).defaultPrevented, true);
+  assert.equal(f.controller.spaceKeyHeld, false);
+  assert.equal(f.microphone.enabled, true, 'an outside Space gesture must not claim or mute an open-mic session');
+  assert.deepEqual(f.starts, []);
+});
+
+test('push-to-talk teardown removes installed listeners and replacement binds once', (t) => {
+  const f = createPushToTalkFixture(t);
+  const outside = pushToTalkTarget();
+  f.controller.bindPushToTalkShortcut();
+  assert.equal(f.document.count('keydown'), 1);
+  f.key('keydown', outside);
+  const staleCallback = [...f.timers.values()][0].callback;
+  f.controller.stop({ removeUi: true });
+  staleCallback();
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.microphone.stopped, false);
+  assert.equal(f.controller.spaceKeyHeld, false);
+  assert.equal(f.controller.pushToTalkKeyHeld, false);
+  assert.equal(f.controller.pushToTalkMode, false);
+  assert.equal(f.document.count('keydown'), 0);
+  assert.equal(f.document.count('keyup'), 0);
+  assert.equal(f.document.count('visibilitychange'), 0);
+  assert.equal(f.window.count('blur'), 0);
+  f.key('keydown', outside);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.starts.length, 0, 'the removed controller must not respond');
+  const replacement = f.makeController();
+  replacement.controller.bindPushToTalkShortcut();
+  assert.equal(f.document.count('keydown'), 1);
+  assert.equal(f.document.count('keyup'), 1);
+  assert.equal(f.document.count('visibilitychange'), 1);
+  assert.equal(f.window.count('blur'), 1);
+  f.key('keydown', pushToTalkTarget({ tagName: 'INPUT', type: 'text' }));
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.starts.length, 0);
+  f.key('keydown', outside);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(f.starts.length, 1);
+  assert.equal(replacement.microphone.enabled, true);
+  f.key('keyup', outside);
+  assert.equal(replacement.microphone.enabled, false);
 });
 
 test('mic clicks are ignored while Space is physically held', () => {
@@ -57,12 +519,12 @@ test('mic clicks are ignored while Space is physically held', () => {
 test('voice control help tray reflects the push-to-talk key state', () => {
   assert.equal(
     resolveVoiceControlHint(false, false),
-    'Hold Space to speak · click mic to toggle voice',
+    'Hold Space to speak · tap Space to activate focused controls',
   );
   assert.equal(resolveVoiceControlHint(true, true), 'Release Space to send');
   assert.equal(
     resolveVoiceControlHint(true, false),
-    'Hold Space to speak · click mic to toggle voice',
+    'Hold Space to speak · tap Space to activate focused controls',
   );
 });
 
@@ -154,7 +616,7 @@ test('failed or superseded Radio preflight keeps voice open and cancels audio', 
 test('replacement input invalidates an in-flight Radio preflight immediately', () => {
   const order = [];
   const controller = new GevRealtimeController({
-    ui: {},
+    ui: createTestVoiceUi(),
     runner: async () => ({}),
     radioLayer: { stopPlayback: () => order.push('radio-stop') },
   });
@@ -168,56 +630,55 @@ test('replacement input invalidates an in-flight Radio preflight immediately', (
   assert.equal(controller.radioHandoffEpoch, priorEpoch + 1);
 });
 
-test('direct Radio pause or stop cancels a pending voice handoff', async () => {
-  const order = [];
-  let playbackControl = null;
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
-  const controller = new GevRealtimeController({
-    ui,
-    runner: async () => ({ ok: true }),
-    radioLayer: {
-      subscribePlaybackControls(listener) {
-        playbackControl = listener;
-        return () => { playbackControl = null; };
+for (const [name, control, message] of [
+  ['direct Radio pause or stop cancels a pending voice handoff', 'stop', 'the explicit stop remains authoritative'],
+  [
+    'a direct Radio Next that does not play cancels a pending voice handoff',
+    { action: 'select', origin: 'user', attemptId: null },
+    'the user selection is not overridden by voice playback',
+  ],
+]) {
+  test(name, async () => {
+    const order = [];
+    let playbackControl = null;
+    const ui = createTestVoiceUi();
+    const controller = new GevRealtimeController({
+      ui,
+      runner: async () => ({ ok: true }),
+      radioLayer: {
+        subscribePlaybackControls(listener) {
+          playbackControl = listener;
+          return () => { playbackControl = null; };
+        },
+        playForVoice: async () => {
+          order.push('radio-play');
+          return true;
+        },
+        stopPlayback: () => order.push('radio-stop'),
       },
-      playForVoice: async () => {
-        order.push('radio-play');
-        return true;
-      },
-      stopPlayback: () => order.push('radio-stop'),
-    },
-  });
-  controller.debugLog = () => {};
-  controller.dc = {
-    readyState: 'open',
-    send() {},
-    close() { order.push('voice-stop'); },
-  };
-  controller.pendingRadioPlaybackResult = { ok: true, radioPlaybackRequested: true };
+    });
+    controller.debugLog = () => {};
+    controller.dc = {
+      readyState: 'open',
+      send() {},
+      close() { order.push('voice-stop'); },
+    };
+    controller.pendingRadioPlaybackResult = { ok: true, radioPlaybackRequested: true };
 
-  playbackControl('stop');
-  await controller.handleRealtimeEvent({
-    data: JSON.stringify({ type: 'response.done', response: { status: 'completed' } }),
-  });
+    playbackControl(control);
+    await controller.handleRealtimeEvent({
+      data: JSON.stringify({ type: 'response.done', response: { status: 'completed' } }),
+    });
 
-  assert.equal(controller.pendingRadioPlaybackResult, null);
-  assert.deepEqual(order, [], 'the explicit stop remains authoritative');
-});
+    assert.equal(controller.pendingRadioPlaybackResult, null);
+    assert.deepEqual(order, [], message);
+  });
+}
 
 test('confirmed manual Radio playback closes active voice without stopping Radio', () => {
   const order = [];
   let playbackControl = null;
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async () => ({ ok: true }),
@@ -250,12 +711,7 @@ test('manual playback takeover survives stale voice preflight cleanup', async ()
   let resolvePreflight;
   let activeAttemptId = null;
   const stopRequests = [];
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const radioLayer = {
     subscribePlaybackControls(listener) {
       playbackControl = listener;
@@ -307,7 +763,7 @@ test('manual playback takeover survives stale voice preflight cleanup', async ()
 test('internal Radio cleanup controls do not masquerade as newer user input', () => {
   let playbackControl = null;
   const controller = new GevRealtimeController({
-    ui: {},
+    ui: createTestVoiceUi(),
     runner: async () => ({}),
     radioLayer: {
       subscribePlaybackControls(listener) {
@@ -332,7 +788,7 @@ test('manual Radio playback does not close voice when voice is already idle', ()
   let playbackControl = null;
   let voiceStops = 0;
   const controller = new GevRealtimeController({
-    ui: {},
+    ui: createTestVoiceUi(),
     runner: async () => ({}),
     radioLayer: {
       subscribePlaybackControls(listener) {
@@ -352,12 +808,7 @@ test('manual Radio playback does not close voice when voice is already idle', ()
 test('active-response Realtime errors invalidate pending and in-flight Radio handoffs', async () => {
   const order = [];
   let playbackControl = null;
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async () => ({ ok: true }),
@@ -405,16 +856,7 @@ test('voice ownership ducks tuner static before pausing broadcaster audio', () =
 test('Radio handoff waits for response.done so later multi-intent tools execute before voice closes', async () => {
   const order = [];
   const confirmationInstructions = [];
-  const ui = {
-    root: {
-      dataset: {},
-      classList: { remove() {} },
-      querySelectorAll: () => [],
-    },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const runner = async (name) => {
     order.push(`tool:${name}`);
     if (name === 'control_radio') {
@@ -496,15 +938,46 @@ test('Radio handoff waits for response.done so later multi-intent tools execute 
   ]);
 });
 
+test('Realtime gives analyst siblings one authority group and a newer response a new group', async () => {
+  const groups = [];
+  const ui = createTestVoiceUi();
+  const controller = new GevRealtimeController({
+    ui,
+    runner: async (name, _args, options) => {
+      groups.push([name, options.authorityGroup]);
+      return { ok: true, action: name, count: 0, items: [] };
+    },
+  });
+  controller.debugLog = () => {};
+  controller.sendVisualContextIfUseful = async () => false;
+  controller.dc = { readyState: 'open', send() {}, close() {} };
+  const event = (payload) => ({ data: JSON.stringify(payload) });
+  for (const [responseId, callId] of [
+    ['response-1', 'analyst-a'],
+    ['response-1', 'analyst-b'],
+    ['response-2', 'analyst-c'],
+  ]) {
+    await controller.handleRealtimeEvent(
+      event({
+        type: 'response.function_call_arguments.done',
+        response_id: responseId,
+        call_id: callId,
+        name: 'analyst_query',
+        arguments: '{"layers":["flights"],"scope":{"kind":"anywhere"}}',
+      }),
+    );
+  }
+  assert.deepEqual(groups, [
+    ['analyst_query', 'response-1'],
+    ['analyst_query', 'response-1'],
+    ['analyst_query', 'response-2'],
+  ]);
+});
+
 test('Radio playback failure leaves voice connected and speaks a correction', async () => {
   const sent = [];
   const order = [];
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async () => ({
@@ -557,16 +1030,7 @@ test('Radio playback failure leaves voice connected and speaks a correction', as
 
 test('detected speech cancels a prepared Radio handoff before a cancelled response completes', async () => {
   const order = [];
-  const ui = {
-    root: {
-      dataset: {},
-      classList: { remove() {} },
-      querySelectorAll: () => [],
-    },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async () => ({
@@ -625,12 +1089,7 @@ test('a Radio tool result that resolves after speech interruption cannot re-arm 
   let resolveRunner;
   const runnerResult = new Promise((resolve) => { resolveRunner = resolve; });
   let receivedSignal = null;
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (_name, _args, options) => {
@@ -685,12 +1144,7 @@ test('sibling tool calls in one response do not abort an in-flight Radio action'
   let resolveRadio;
   let radioSignal = null;
   const radioResult = new Promise((resolve) => { resolveRadio = resolve; });
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (name, _args, options) => {
@@ -731,12 +1185,7 @@ test('Radio stop does not abort an unrelated sibling tool from the same response
   let releaseStyle;
   let styleSignal = null;
   const styleResult = new Promise((resolve) => { releaseStyle = resolve; });
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (name, _args, options) => {
@@ -810,12 +1259,7 @@ test('real Radio Select cannot enable or play after a same-response Disable comp
       return true;
     },
   };
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   globalThis.window = { __GOOGLE_MAPS_API_KEY__: 'test-key' };
   globalThis.fetch = async () => {
     announceLookupStarted();
@@ -937,16 +1381,12 @@ test('generic same-response Radio visibility disable supersedes delayed Select',
   });
   const viewer = {
     clock: { onTick: { addEventListener: () => () => {} } },
+    canvas: { addEventListener() {}, removeEventListener() {} },
     scene: { canvas: { addEventListener() {}, removeEventListener() {} } },
     camera: { moveEnd: { addEventListener() {} } },
   };
   const genericRunner = createGevActionRunner({ viewer, styleManager: {}, dataManager });
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   globalThis.window = { __GOOGLE_MAPS_API_KEY__: 'test-key' };
   globalThis.fetch = async () => {
     announceLookupStarted();
@@ -1076,12 +1516,7 @@ test('same-response Pause aborts a real manager enable already in flight', async
   dataManager.subscribe((change) => {
     if (change.type === 'visibility') trace.push(`visibility:${change.enabled}`);
   });
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     dataManager,
@@ -1199,6 +1634,7 @@ test('Pause and Stop preserve independent dedicated and generic Radio ON across 
               });
               const viewer = {
                 clock: { onTick: { addEventListener: () => () => {} } },
+                canvas: { addEventListener() {}, removeEventListener() {} },
                 scene: { canvas: { addEventListener() {}, removeEventListener() {} } },
                 camera: { moveEnd: { addEventListener() {} } },
               };
@@ -1207,12 +1643,7 @@ test('Pause and Stop preserve independent dedicated and generic Radio ON across 
                 styleManager: {},
                 dataManager,
               });
-              const ui = {
-                root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-                status: { textContent: '' },
-                detail: { textContent: '', title: '' },
-                errorDetail: { textContent: '' },
-              };
+              const ui = createTestVoiceUi();
               const controller = new GevRealtimeController({
                 ui,
                 dataManager,
@@ -1341,12 +1772,7 @@ test('successful same- or newer-response Stop aborts Select across real manager 
           if (change.origin === 'voice') persistenceWrites.push(change.enabled);
         }
       });
-      const ui = {
-        root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-        status: { textContent: '' },
-        detail: { textContent: '', title: '' },
-        errorDetail: { textContent: '' },
-      };
+      const ui = createTestVoiceUi();
       const controller = new GevRealtimeController({
         ui,
         radioLayer,
@@ -1412,12 +1838,7 @@ test('same-response pause and disable suppress play/select handoffs without canc
       const playbackGate = new Promise((resolve) => { releasePlayback = resolve; });
       const sent = [];
       const radioState = { enabled: true, audioState: 'playing' };
-      const ui = {
-        root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-        status: { textContent: '' },
-        detail: { textContent: '', title: '' },
-        errorDetail: { textContent: '' },
-      };
+      const ui = createTestVoiceUi();
       const controller = new GevRealtimeController({
         ui,
         radioLayer: { getUIState: () => ({ ...radioState }) },
@@ -1493,12 +1914,7 @@ test('Realtime Radio route exceptions preserve the authoritative lifecycle summa
   for (const route of ['dedicated', 'generic']) {
     const sent = [];
     const lifecycle = { enabled: true, lifecycleState: 'disabling', uncertain: true };
-    const ui = {
-      root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-      status: { textContent: '' },
-      detail: { textContent: '', title: '' },
-      errorDetail: { textContent: '' },
-    };
+    const ui = createTestVoiceUi();
     const controller = new GevRealtimeController({
       ui,
       dataManager: {
@@ -1545,12 +1961,7 @@ test('different-response Radio stop remains a cancellation authority for an olde
   let releaseSelect;
   const selectGate = new Promise((resolve) => { releaseSelect = resolve; });
   const sent = [];
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (_name, args) => {
@@ -1623,12 +2034,7 @@ test('failed same-response stop does not suppress a successful playback request'
     }]]),
     isEnabled: () => true,
   };
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (_name, args) => {
@@ -1731,12 +2137,7 @@ test('failed same-response Stop preserves Select auto-enable held inside real ma
   };
   dataManager = new DataLayerManager({});
   dataManager.register(radioLayer);
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     dataManager,
@@ -1819,12 +2220,7 @@ test('failed same-response Pause and Disable do not suppress valid older playbac
           return () => visibilityListeners.delete(listener);
         },
       };
-      const ui = {
-        root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-        status: { textContent: '' },
-        detail: { textContent: '', title: '' },
-        errorDetail: { textContent: '' },
-      };
+      const ui = createTestVoiceUi();
       const controller = new GevRealtimeController({
         ui,
         dataManager,
@@ -1882,12 +2278,7 @@ test('failed generic same-response Radio OFF does not suppress valid older playb
   let releaseSelect;
   const selectGate = new Promise((resolve) => { releaseSelect = resolve; });
   const sent = [];
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (name, args) => {
@@ -1976,12 +2367,7 @@ test('direct user Radio OFF aborts an in-flight voice enable before settled publ
   dataManager.subscribe((change) => {
     if (change.type === 'visibility') visibility.push(`${change.origin}:${change.enabled}`);
   });
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     dataManager,
@@ -2067,12 +2453,7 @@ test('direct user Radio OFF freezes a prepared handoff until disable success or 
       dataManager = new DataLayerManager({});
       dataManager.register(radioLayer);
       await dataManager.setEnabled('radio', true);
-      const ui = {
-        root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-        status: { textContent: '' },
-        detail: { textContent: '', title: '' },
-        errorDetail: { textContent: '' },
-      };
+      const ui = createTestVoiceUi();
       const controller = new GevRealtimeController({
         ui,
         dataManager,
@@ -2146,12 +2527,7 @@ test('dedicated and generic Radio OFF reservations freeze an in-flight playback 
           },
           getUIState: () => ({ enabled: true, audioState: 'stopped' }),
         };
-        const ui = {
-          root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-          status: { textContent: '' },
-          detail: { textContent: '', title: '' },
-          errorDetail: { textContent: '' },
-        };
+        const ui = createTestVoiceUi();
         const controller = new GevRealtimeController({
           ui,
           radioLayer,
@@ -2248,12 +2624,7 @@ test('delayed Stop reports its result before committing or resuming a prepared h
         },
         getUIState: () => ({ enabled: true, audioState: 'stopped' }),
       };
-      const ui = {
-        root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-        status: { textContent: '' },
-        detail: { textContent: '', title: '' },
-        errorDetail: { textContent: '' },
-      };
+      const ui = createTestVoiceUi();
       const controller = new GevRealtimeController({
         ui,
         radioLayer,
@@ -2331,12 +2702,7 @@ test('stale handoff cleanup cannot erase a resumed successor across repeated fai
       return true;
     },
   };
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     radioLayer,
@@ -2383,12 +2749,7 @@ test('stale handoff cleanup cannot erase a resumed successor across repeated fai
 });
 
 test('a later same-response stop clears an already prepared playback result', async () => {
-  const ui = {
-    root: { dataset: {}, classList: { remove() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: async (_name, args) => args.action === 'select'
@@ -2525,7 +2886,7 @@ test('hidden document yields no fresh frame — capture must not label a stale c
   };
   try {
     globalThis.document = { hidden: true };
-    const fresh = await renderFreshCesiumFrame({ scene });
+    const fresh = await renderFreshCesiumFrame(framed(scene));
     assert.equal(fresh, false, 'hidden capture reports non-fresh');
     assert.equal(requested, 0, 'no secret render restart while hidden');
   } finally {
@@ -2542,7 +2903,7 @@ test('visible document with a rendering scene reports a fresh frame', async () =
       postRender: { addEventListener(listener) { fire = listener; return () => { fire = null; }; } },
       requestRender() { queueMicrotask(() => fire?.()); },
     };
-    const fresh = await renderFreshCesiumFrame({ scene });
+    const fresh = await renderFreshCesiumFrame(framed(scene));
     assert.equal(fresh, true);
   } finally {
     globalThis.document = originalDocument;
@@ -2559,7 +2920,7 @@ test('a tab switch during the bounded render wait invalidates freshness', async 
       postRender: { addEventListener(listener) { fire = listener; return () => { fire = null; }; } },
       requestRender() { doc.hidden = true; queueMicrotask(() => fire?.()); },
     };
-    const fresh = await renderFreshCesiumFrame({ scene });
+    const fresh = await renderFreshCesiumFrame(framed(scene));
     assert.equal(fresh, false, 'freshness rechecked after the await');
   } finally {
     globalThis.document = originalDocument;
@@ -2682,22 +3043,7 @@ const usdUsage = (usd) => ({
 /** A controller wired to inert UI stubs, with the cost surface present. */
 function costControllerHarness({ runner } = {}) {
   const toolCalls = [];
-  const ui = {
-    root: { dataset: {}, classList: { remove() {}, add() {} }, querySelectorAll: () => [] },
-    status: { textContent: '' },
-    detail: { textContent: '', title: '' },
-    errorDetail: { textContent: '' },
-    button: { dataset: {} },
-    buttonLabel: { textContent: '' },
-    tierButton: {
-      textContent: '',
-      title: '',
-      attrs: {},
-      setAttribute(key, value) { this.attrs[key] = value; },
-      getAttribute(key) { return this.attrs[key] ?? null; },
-    },
-    costValue: { textContent: '', title: '', dataset: {} },
-  };
+  const ui = createTestVoiceUi();
   const controller = new GevRealtimeController({
     ui,
     runner: runner || (async (name) => { toolCalls.push(name); return { ok: true }; }),
@@ -2765,9 +3111,57 @@ test('F1: the toggle still records the next-session preference while live', () =
   controller.status = 'listening';
   controller.setVoiceTier('mini');
   assert.equal(controller.voiceTier, 'mini');
-  assert.equal(ui.tierButton.textContent, 'MINI');
+  assert.equal(ui.state.tier.text, 'MINI');
   // ...and says so, rather than implying the live session switched.
-  assert.match(ui.tierButton.title, /this session stays on/i);
+  assert.match(ui.state.tier.title, /this session stays on/i);
+});
+
+test('OAuth cloud sessions report unknown cost and usage without tripping the API spend guard', () => {
+  const { controller, ui } = costControllerHarness();
+  controller.status = 'listening';
+  controller._cost.cloudVoiceAuth = 'oauth';
+  controller._cost.sessionCloudVoiceAuth = 'oauth';
+  controller.syncCostUi();
+  const before = controller.costTracker.state();
+  assert.equal(ui.state.cost.hidden, false);
+  assert.equal(ui.state.cost.text, 'COST UNKNOWN');
+  assert.deepEqual(controller.recordUsage(usdUsage(100)), {
+    responses: 1,
+    input: 0,
+    output: 1562500,
+    captions: 0,
+    costKnown: false,
+  });
+  const after = controller.costTracker.state();
+  assert.equal(after.totalUsd, before.totalUsd);
+  assert.equal(controller.costCapStopped, false);
+  assert.match(ui.state.cost.title, /1 response\(s\).*1562500 output tokens/);
+  controller.dc = {};
+  controller.responseActive = true;
+  controller.stop();
+  assert.match(ui.state.cost.title, /Usage is incomplete/);
+});
+
+test('OAuth cloud sessions count caption transcriptions without pricing them into the API cap', () => {
+  const { controller, ui } = costControllerHarness();
+  controller.status = 'listening';
+  controller._cost.cloudVoiceAuth = 'oauth';
+  controller._cost.sessionCloudVoiceAuth = 'oauth';
+  controller._cost.bindTranscriptionModel('gpt-4o-mini-transcribe');
+  const before = controller.costTracker.state();
+  // Priced, this much caption audio would cross the $5 cap.
+  const result = controller.recordTranscriptionUsage({
+    type: 'duration',
+    seconds: 3_600_000,
+  });
+  assert.equal(result.captions, 1);
+  assert.equal(result.costKnown, false);
+  const after = controller.costTracker.state();
+  assert.equal(after.totalUsd, before.totalUsd);
+  assert.equal(after.capReached, false);
+  assert.equal(controller.costCapStopped, false);
+  assert.equal(ui.state.cost.text, 'COST UNKNOWN');
+  assert.match(ui.state.cost.title, /1 caption transcription\(s\)/);
 });
 
 test('F1: when idle, toggling does re-price the preview meter', () => {
@@ -2971,7 +3365,7 @@ test('F4: two clicks during a live session return to the original preference', (
 
   controller.toggleVoiceTier();
   assert.equal(controller.voiceTier, 'standard', 'second click switches back');
-  assert.equal(ui.tierButton.textContent, 'STD');
+  assert.equal(ui.state.tier.text, 'STD');
 });
 
 test('F4: the toggle alternates across many clicks mid-session', () => {
@@ -3008,7 +3402,7 @@ test('F3: an unrecognised session model bills at the most expensive known rates'
 function textCommandController() {
   const sent = [];
   const controller = new GevRealtimeController({
-    ui: {},
+    ui: createTestVoiceUi(),
     runner: async () => ({}),
   });
   controller.dc = { readyState: 'open' };
@@ -3174,17 +3568,24 @@ test('a live response is untouched when no typed command superseded it', () => {
   assert.equal(controller.isSupersededResponse(null), false, 'an unattributed call is not stale');
 });
 
+/** Observe the actual protocol output rather than replacing its implementation. */
+function observeToolOutputs(controller, record) {
+  const send = controller.sendRealtimeEvent;
+  controller.sendRealtimeEvent = (message, label) => {
+    if (message.type === 'conversation.item.create' && message.item?.type === 'function_call_output') {
+      record(message.item.call_id, JSON.parse(message.item.output));
+    }
+    return send.call(controller, message, label);
+  };
+}
+
 test('a refused superseded call is still answered with a terminal output', async () => {
   // Every function call must be answered. Leaving one unanswered strands a
   // pending call in the conversation and deadlocks the model — the same hazard
   // callDedupeKeys is written to avoid. Refusing is not ignoring.
   const { controller, sent, dispatched } = toolDispatchController();
   const outputs = [];
-  controller.sendToolOutput = (callId, result) => {
-    outputs.push({ callId, result });
-    sent.push('client.function_call_output');
-    return true;
-  };
+  observeToolOutputs(controller, (callId, result) => outputs.push({ callId, result }));
   controller.updateResponseState({ type: 'response.created', response: { id: 'resp_old' } });
   controller.sendTextCommand('stop');
   await controller.handleRealtimeEvent(lateToolEvent('resp_old', 'call_stale'));
@@ -3227,7 +3628,7 @@ test('the two server surfaces of one refused call collapse to a single output', 
   // two outputs for one call_id is its own protocol error.
   const { controller } = toolDispatchController();
   const outputs = [];
-  controller.sendToolOutput = (callId) => { outputs.push(callId); return true; };
+  observeToolOutputs(controller, (callId) => outputs.push(callId));
   controller.updateResponseState({ type: 'response.created', response: { id: 'resp_old' } });
   controller.sendTextCommand('stop');
   await controller.handleRealtimeEvent(lateToolEvent('resp_old', 'call_stale'));
@@ -3239,10 +3640,185 @@ test('a genuinely different refused call still gets its own output', async () =>
   // The collapse must key on call identity, not on "we already refused one".
   const { controller } = toolDispatchController();
   const outputs = [];
-  controller.sendToolOutput = (callId) => { outputs.push(callId); return true; };
+  observeToolOutputs(controller, (callId) => outputs.push(callId));
   controller.updateResponseState({ type: 'response.created', response: { id: 'resp_old' } });
   controller.sendTextCommand('stop');
   await controller.handleRealtimeEvent(lateToolEvent('resp_old', 'call_one'));
   await controller.handleRealtimeEvent(lateToolItemEvent('resp_old', 'call_two', 'item_two'));
   assert.deepEqual(outputs, ['call_one', 'call_two'], 'each distinct call is answered');
+});
+
+test('a claimed Space hold barges in on the assistant; a short tap never does', (t) => {
+  const f = createPushToTalkFixture(t);
+  const canvas = pushToTalkTarget({ tagName: 'CANVAS', id: 'world-overlay-canvas', tabIndex: 0 });
+  let bargeIns = 0;
+  f.controller._turns.bargeIn = () => {
+    bargeIns += 1;
+    return true;
+  };
+  // First hold starts the push-to-talk session; nothing to interrupt yet.
+  f.key('keydown', canvas);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  f.key('keyup', canvas);
+  assert.equal(bargeIns, 0);
+  // A short tap during the reply stays a tap.
+  f.key('keydown', canvas);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS - 1);
+  f.key('keyup', canvas);
+  assert.equal(bargeIns, 0);
+  // Only the 500 ms claim interrupts, and the microphone opens as before.
+  f.key('keydown', canvas);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.equal(bargeIns, 1);
+  assert.equal(f.microphone.enabled, true);
+  f.key('keyup', canvas);
+  // Radio's claim is read before Radio is paused, and a held handoff is
+  // never interrupted.
+  const order = [];
+  const input = f.controller._input;
+  input.mayClaimSpeaker = () => {
+    order.push('claim');
+    return false;
+  };
+  const pause = input.pauseRadioForVoice;
+  input.pauseRadioForVoice = (...args) => {
+    order.push('pause');
+    return pause(...args);
+  };
+  f.key('keydown', canvas);
+  f.advance(PUSH_TO_TALK_HOLD_DELAY_MS);
+  assert.deepEqual(order.slice(0, 2), ['claim', 'pause']);
+  assert.equal(bargeIns, 1, 'no barge-in while Radio holds the speaker');
+  f.key('keyup', canvas);
+});
+
+const testPlaceSearch = () => createStandalonePlaceSearch({ resolveApiKey: () => globalThis.window?.__GOOGLE_MAPS_API_KEY__ });
+function createGevActionRunner(options) { return createActionRunner({ placeSearch: testPlaceSearch(), ...options }); }
+function controlRadio(viewer, manager, args, options) { return runControlRadio(viewer, manager, args, { placeSearch: testPlaceSearch(), ...options }); }
+
+test('voice runs app actions itself and other tools through the catalog', async () => {
+  const actions = [];
+  const runner = async (name, args) => {
+    actions.push([name, args]);
+    return { ok: true, action: name };
+  };
+  const resets = [];
+  const disposals = [];
+  runner.resetConversation = (...args) => {
+    resets.push(args);
+    return 'reset';
+  };
+  runner.dispose = (...args) => {
+    disposals.push(args);
+    return 'disposed';
+  };
+  const calls = [];
+  let loads = 0;
+  const catalog = {
+    get: (name) => (name === 'get_wind' ? { name } : undefined),
+    async call(name, args, options) {
+      calls.push([name, args, options.signal]);
+      return { summary: 'Calm.', data: { calm: true } };
+    },
+  };
+  const run = withToolCatalog(runner, async () => {
+    loads += 1;
+    return catalog;
+  });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await run('zoom_to_globe', {}), {
+    ok: true,
+    action: 'zoom_to_globe',
+  });
+  assert.equal(loads, 0);
+  assert.deepEqual(
+    await run('get_wind', { location: { place: 'Oslo' } }, { signal }),
+    { ok: true, tool: 'get_wind', summary: 'Calm.', data: { calm: true } },
+  );
+  assert.deepEqual(calls, [
+    ['get_wind', { location: { place: 'Oslo' } }, signal],
+  ]);
+  await run('not_a_tool', {});
+  assert.deepEqual(
+    actions.map(([name]) => name),
+    ['zoom_to_globe', 'not_a_tool'],
+  );
+  assert.equal(run.resetConversation('stopped'), 'reset');
+  assert.equal(run.dispose('removed'), 'disposed');
+  assert.deepEqual(resets, [['stopped']]);
+  assert.deepEqual(disposals, [['removed']]);
+  assert.equal(withToolCatalog(runner, undefined), runner);
+});
+
+test('the controller forwards viewport escalation diagnostics to its debug log', async () => {
+  const records = [];
+  const controller = new GevRealtimeController({
+    ui: createTestVoiceUi(),
+    runner: async () => ({ ok: true }),
+    radioLayer: { subscribePlaybackControls: () => () => {}, setVoiceDucked() {} },
+  });
+  controller.debugLog = (event, detail) => records.push({ event, detail });
+  controller.dc = { readyState: 'open', send() {}, close() {} };
+
+  assert.equal(
+    await controller.sendVisualContextIfUseful({
+      action: 'get_entity_context',
+      scene: { basemap: { viewScale: 'regional' } },
+    }),
+    false,
+  );
+  assert.deepEqual(
+    records.filter((record) => record.event.startsWith('viewport_context.')),
+    [{
+      event: 'viewport_context.decision',
+      detail: { contextId: 1, send: false, reason: 'view-scale-not-local', viewScale: 'regional' },
+    }],
+  );
+});
+
+test('a missing server key says where to add it, without the microphone hint, in every language', () => {
+  const ui = createTestVoiceUi();
+  const controller = new GevRealtimeController({
+    ui,
+    runner: async () => ({ ok: true }),
+    radioLayer: { subscribePlaybackControls: () => () => {}, setVoiceDucked() {} },
+  });
+  try {
+    controller.reportError(
+      'Realtime connection',
+      Object.assign(new Error('OPENAI_API_KEY is not set'), { code: 'API_KEY_MISSING' }),
+    );
+    assert.equal(ui.state.error.text, 'Needs OPENAI_API_KEY — add it in Provider Settings');
+    assert.equal(ui.state.error.hint, false);
+
+    setLocale('es');
+    assert.notEqual(ui.state.error.text, 'Needs OPENAI_API_KEY — add it in Provider Settings');
+    assert.match(ui.state.error.text, /OPENAI_API_KEY/);
+    assert.equal(ui.state.error.hint, false);
+    setLocale('en');
+
+    controller.reportError('Realtime connection', new Error('ICE failed'));
+    assert.match(ui.state.error.text, /ICE failed/);
+    assert.equal(ui.state.error.hint, true);
+  } finally {
+    setLocale('en');
+  }
+});
+
+test('a status from a shared helper is worded again after a language change', () => {
+  const ui = createTestVoiceUi();
+  const controller = new GevRealtimeController({
+    ui,
+    runner: async () => ({ ok: true }),
+    radioLayer: { subscribePlaybackControls: () => () => {}, setVoiceDucked() {} },
+  });
+  try {
+    controller.setStatus('listening', 'Radio did not start');
+    assert.equal(ui.state.detail.text, 'Radio did not start');
+    setLocale('es');
+    assert.equal(ui.state.detail.text, t('Radio did not start'));
+    assert.notEqual(ui.state.detail.text, 'Radio did not start');
+  } finally {
+    setLocale('en');
+  }
 });

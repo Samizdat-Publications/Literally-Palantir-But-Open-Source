@@ -18,8 +18,6 @@
 // registry (director._captureLayerStates), so those shots declare all sixteen
 // keys and still reconcile in full.
 
-import { contextLayerEnableBlockReason } from '../contextModePolicy.js';
-
 /**
  * Layer params that re-establish a tracked contact — and with it a SECOND
  * writer on the camera.
@@ -80,7 +78,8 @@ export const SCENE_SELECTION_PARAM_PATTERN =
  */
 export function stripSceneTrackingParams(params) {
   if (!params || typeof params !== 'object') return undefined;
-  if (!SCENE_TRACKING_PARAM_KEYS.some((key) => Object.hasOwn(params, key))) return params;
+  if (!SCENE_TRACKING_PARAM_KEYS.some((key) => Object.hasOwn(params, key)))
+    return params;
 
   const kept = {};
   for (const [key, value] of Object.entries(params)) {
@@ -88,44 +87,6 @@ export function stripSceneTrackingParams(params) {
     kept[key] = value;
   }
   return Object.keys(kept).length ? kept : undefined;
-}
-
-/**
- * Reserved layer id used ONLY to interrogate a Context mode's enable guard.
- *
- * The probe asks "would this mode refuse a layer it has no opinion about?" —
- * so it must name a layer that can never exist. The double-underscore form is
- * outside the kebab-case convention every real layer id follows, and
- * scenePolicy.test.mjs asserts no registered layer claims it, so the reservation
- * is enforced rather than assumed.
- * @constant {string}
- */
-export const SCENE_EXCLUSIVITY_PROBE_LAYER_ID = '__scene-exclusivity-probe__';
-
-/**
- * Whether an active Context mode must be exited before a shot's layers can be
- * applied.
- *
- * Space Missions is the shipped case: it isolates replay data, so its guard
- * (contextLayerEnableBlockReason) refuses every enable outside its own bundle.
- * A recipe declaring only flights/satellites/earthquakes/traffic would have
- * those enables refused outright — and Orbital Watch, whose satellites the
- * guard does permit, would still play over the mode's rocket-launches replay
- * it never declared. Either way the shot is not the composition it describes.
- *
- * The verdict is read off the guard itself rather than a mode name: a mode
- * that refuses an arbitrary unrelated layer is by definition isolating, so a
- * future isolating mode is covered the day its branch is added to the policy.
- *
- * @param {string|null} contextMode Active (or entering) Context mode.
- * @returns {boolean} Whether playback must leave the mode first.
- */
-export function sceneRequiresContextModeExit(contextMode) {
-  if (!contextMode) return false;
-  return contextLayerEnableBlockReason({
-    contextMode,
-    change: { layerId: SCENE_EXCLUSIVITY_PROBE_LAYER_ID, enabled: true },
-  }) !== null;
 }
 
 /**
@@ -144,9 +105,12 @@ export function sceneRequiresContextModeExit(contextMode) {
  * @returns {Array<{ id: string, enabled: boolean, params: Object|undefined }>}
  */
 export function sceneLayerPlan(targetStates, registeredIds) {
-  const known = registeredIds instanceof Set
-    ? registeredIds
-    : (registeredIds ? new Set(registeredIds) : null);
+  const known =
+    registeredIds instanceof Set
+      ? registeredIds
+      : registeredIds
+        ? new Set(registeredIds)
+        : null;
 
   const plan = [];
   for (const [id, target] of Object.entries(targetStates || {})) {
@@ -154,7 +118,10 @@ export function sceneLayerPlan(targetStates, registeredIds) {
     plan.push({
       id,
       enabled: !!(target && target.enabled),
-      params: target && target.params ? stripSceneTrackingParams(target.params) : undefined,
+      params:
+        target && target.params
+          ? stripSceneTrackingParams(target.params)
+          : undefined,
     });
   }
   return plan;

@@ -1,4 +1,11 @@
-import * as Cesium from 'cesium';
+import { WORLD_OVERLAY_OCCLUDER_SELECTORS } from './worldOverlayChrome.js';
+import { setClickCardHitTest } from '../data/pickRegistry.js';
+export { WORLD_OVERLAY_OCCLUDER_SELECTORS } from './worldOverlayChrome.js';
+import {
+  createCyberSonarSampler,
+  isCyberContactSonarActive as isCyberSonarActive,
+  CYBER_SONAR_RENDER_INTERVAL_MS,
+} from '../cyberSonar.js';
 import {
   getKeyholeFadeTuning,
   getKeyholeGeometry,
@@ -14,8 +21,16 @@ import {
   measureOverlayEntry,
   paintOverlayEntry,
   placementVariants,
+  truncateOverlayTitle,
 } from './worldOverlayDraw.js';
 import { WORLD_OVERLAY_STYLE } from './worldOverlayTokens.js';
+import { t } from '../i18n/index.js';
+import {
+  canvasOf,
+  findCamera,
+  findFrame,
+  findQuery,
+} from '../render/rendererOf.js';
 
 /**
  * @module worldOverlay
@@ -27,9 +42,6 @@ import { WORLD_OVERLAY_STYLE } from './worldOverlayTokens.js';
 const ROOT_ID = 'world-overlay-root';
 const CANVAS_ID = 'world-overlay-canvas';
 const DETECTION_SURFACE_ID = 'world-overlay-detection-surface';
-const ACCESSIBILITY_ROOT_ID = 'world-overlay-actions';
-const ACCESSIBILITY_LIST_ID = 'world-overlay-action-list';
-const ACCESSIBILITY_STATUS_ID = 'world-overlay-status';
 const PAINT_TARGET_SHARED = 'shared';
 const PAINT_TARGET_DETECTION = 'detection';
 const OCCLUDER_PADDING_PX = 6;
@@ -45,7 +57,14 @@ const DEFAULT_COLLISION_CAPACITY = 96;
 // active/protected entries bypass it.
 export const AMBIENT_CARD_COLLISION_CAPACITY = 1150;
 const DEFAULT_MOVING_SOLVE_MS = 125;
-const VALID_VARIANTS = new Set(['label', 'track', 'card', 'thumbnail', 'selected', 'tracked']);
+const VALID_VARIANTS = new Set([
+  'label',
+  'track',
+  'card',
+  'thumbnail',
+  'selected',
+  'tracked',
+]);
 
 /** Stable logical bottom-to-top paint order across the host-owned surfaces. */
 export const WORLD_OVERLAY_PAINT_LANES = Object.freeze([
@@ -58,64 +77,17 @@ export const WORLD_OVERLAY_PAINT_LANES = Object.freeze([
   'tracked',
 ]);
 
-const PAINT_LANE_INDEX = new Map(WORLD_OVERLAY_PAINT_LANES.map((lane, index) => [lane, index]));
-
-/**
- * Unified UI exclusion inventory. Selectors may match multiple elements; the
- * service caches their rectangles and observes layout/visibility changes.
- *
- * These rectangles are a PLACEMENT policy, never a paint mask. Every element
- * listed here composites ABOVE the overlay host — map chrome sits at z90–z1000
- * and the cockpit HUD at z145, against this host's z5/z6 — so the browser
- * already keeps overlay pixels off it and no canvas needs clipping. What the
- * inventory buys is readability: a card placed under solid chrome is simply
- * lost, so the solver PREFERS placements clear of it. When nothing is clear the
- * entry still renders and the chrome covers it, exactly as it did before the
- * host existed.
- *
- * The list therefore holds only chrome dense enough to swallow a card. The
- * cockpit's thin translucent line art — rims, arcs, rails, tapes, toplines,
- * readouts — is deliberately ABSENT under the AR-HUD ruling:
- * world-space overlay content renders beneath the cockpit's screen-space HUD,
- * which paints over it by z-order. Those elements are also enormous (the
- * altitude rim is keyhole-tall, the topline viewport-wide), and excluding them
- * suppressed essentially the entire cockpit view. Only the two solid,
- * backdrop-filled cockpit windows survive as exclusions.
- */
-export const WORLD_OVERLAY_OCCLUDER_SELECTORS = Object.freeze([
-  '#title-bar',
-  '#style-indicator',
-  '#top-center-actions',
-  '#traffic-sync-chip',
-  '#cctv-sync-chip',
-  '#left-panel-stack',
-  '#right-context-rail',
-  '#pp-toggles',
-  '#command-dock',
-  '#gev-voice-control',
-  '#cesium-credits',
-  '.hud-top-left',
-  '.hud-top-right',
-  '.hud-bottom-left',
-  '.hud-bottom-right',
-  '.hud-top-bar',
-  '.hud-bottom-bar',
-  '#space-mission-panel',
-  '#space-mission-panel-host',
-  '#military-awareness-panel',
-  // Cockpit: solid backdrop-filled windows only (both bounded to
-  // `min(340px, 28vw)` wide and `min(42vh, 410px)` tall, both `hidden` until
-  // toggled). Every other cockpit selector was removed — see the block comment.
-  '#cockpit-context',
-  '#cockpit-signal-stream',
-]);
+const PAINT_LANE_INDEX = new Map(
+  WORLD_OVERLAY_PAINT_LANES.map((lane, index) => [lane, index]),
+);
 
 /** @typedef {{x:number,y:number,w:number,h:number}} OverlayRect */
 /**
  * @typedef {object} WorldOverlayEntry
  * @property {string} id Stable identity within the source.
  * @property {string} source Owning source id.
- * @property {Cesium.Cartesian3|function():Cesium.Cartesian3} position
+ * @property {{x: number, y: number, z: number}|function():{x: number, y: number, z: number}} position
+ *   ECEF metres.
  * @property {'label'|'track'|'card'|'thumbnail'|'selected'|'tracked'} variant
  * @property {string} [accessibilityLabel] Accessible name for an actionable card.
  * @property {function():*} [activate] Keyboard/assistive activation callback.
@@ -127,24 +99,45 @@ export const WORLD_OVERLAY_OCCLUDER_SELECTORS = Object.freeze([
  * @property {number} [alpha=1]
  * @property {number} [cohortLimit=256] Ambient surplus retained per domain.
  * @property {number} [collisionCapacity=96] Shared domain paint budget.
+ * @property {number} [maxVisible=Infinity] Source ceiling within a shared domain.
  * @property {boolean} [moving=false] Enables bounded interval re-solves.
  * @property {number} [solveIntervalMs=125]
+ * @property {function(Set<string>):void} [onVisibilityChange] Painted entry ids,
+ *   reported only on membership changes. The borrowed Set is read-only.
  */
 
-/** @type {Cesium.Viewer|null} */
+/**
+ * The scene object the host was given (a viewer): its `container` and
+ * `canvas` place and size the overlay, and the renderer's ports drawing it
+ * project, cull and drive the frames.
+ * @type {object|null}
+ */
 let _viewer = null;
+/** @type {import('../render/contract/camera').CameraPort|null} */
+let _camera = null;
+/** @type {import('../render/contract/frame').FramePort|null} */
+let _frame = null;
+/** @type {import('../render/contract/query').QueryPort|null} */
+let _query = null;
+/** The eye this frame, ECEF metres, and its height above the ellipsoid. */
+const _eye = { x: 0, y: 0, z: 0 };
+let _eyeHeight = Number.NaN;
 /** @type {HTMLElement|null} */
 let _root = null;
 /** @type {HTMLCanvasElement|null} */
 let _canvas = null;
 /** @type {CanvasRenderingContext2D|null} */
 let _ctx = null;
-/** @type {HTMLElement|null} Focusable mirror of painted actionable cards. */
-let _accessibilityRoot = null;
-/** @type {HTMLElement|null} */
-let _accessibilityList = null;
-/** @type {HTMLElement|null} */
-let _accessibilityStatus = null;
+/**
+ * The focusable mirror of painted actionable cards, as its view renders it:
+ * `{owner, items, status, announced}`, or null without a host. `announced`
+ * counts accepted focuses, so a repeated announcement is spoken again. Subscribers (the
+ * application shell, which publishes it to a store) receive every change;
+ * the module itself needs no Vue, for the portable transit entry.
+ * @type {?{owner: object, items: object[], status: string, announced: number}}
+ */
+let _actions = null;
+const _actionsListeners = new Set();
 let _accessibilitySignature = '';
 const _accessibleActivatorByKey = new Map();
 /** @type {HTMLCanvasElement|null} Host-owned detection blend-isolation surface. */
@@ -159,6 +152,7 @@ let _resizeObserver = null;
 let _mutationObserver = null;
 let _observedOccluderElements = new WeakSet();
 let _occluderRefreshTimer = null;
+let _sonarRenderTimer = null;
 let _cockpitModeHandler = null;
 let _windowResizeHandler = null;
 let _cockpitActive = false;
@@ -200,13 +194,30 @@ const _domains = new Map();
 const _domainList = [];
 /** @type {Map<string, object>} */
 const _records = new Map();
-const _scratchViewProjection = new Cesium.Matrix4();
+/**
+ * A record's ECEF position. A class, not a literal: its fields take doubles
+ * from the first write in place, which keeps the projection pass from
+ * allocating per candidate.
+ */
+class Position {
+  constructor() {
+    this.x = 0.0;
+    this.y = 0.0;
+    this.z = 0.0;
+  }
+}
+/** Column-major projection × view, this frame. */
+const _scratchViewProjection = new Float64Array(16);
 const _viewProjectionScalars = {};
 const _viewport = { width: 0, height: 0 };
+/**
+ * The horizon test handed to custom paint lanes and used by the projection
+ * pass: the renderer's own (`query.isOccluded`), from this frame's eye.
+ */
+const _horizon = Object.freeze({
+  isPointVisible: (position) => !_query?.isOccluded(position),
+});
 let _occluder = null;
-let _occluderCameraX = Number.NaN;
-let _occluderCameraY = Number.NaN;
-let _occluderCameraZ = Number.NaN;
 /** Cached keyhole geometry, versioned by both its box and shared tuning. */
 let _keyhole = null;
 let _keyholeWidth = -1;
@@ -229,8 +240,13 @@ const _customPaintFrame = {
   viewProjectionMatrix: _scratchViewProjection,
   viewProjection: _viewProjectionScalars,
   cameraPosition: null,
+  /** The eye's height above the ellipsoid (m), from the camera port's pose. */
+  cameraHeight: Number.NaN,
   occluder: null,
   keyhole: null,
+  // Anchored custom glyphs yield to the same below-host chrome as entries.
+  overlapsHardUi: (rect) =>
+    overlayRectIntersectsAnyHard(rect, _uiOcclusionRects),
   uiRects: _uiOcclusionRects,
   uiRectCount: 0,
   layoutRevision: 0,
@@ -239,6 +255,10 @@ const _paintQueue = [];
 const _paintItemPool = [];
 const _paintRectPool = [];
 const _paintRectByKey = new Map();
+/** @type {Map<string, Map<string, object>>} This frame's paint items by source and entry id. */
+const _queuedItemBySource = new Map();
+/** Index rows that stop painting are dropped this many frames apart. */
+const QUEUED_ITEM_PRUNE_FRAMES = 600;
 const _hitRects = [];
 const _paintedBySource = Object.create(null);
 const _paintedSourceKeys = [];
@@ -273,7 +293,9 @@ function nowMs() {
 }
 
 function clamp01(value, fallback = 1) {
-  return Number.isFinite(Number(value)) ? Math.max(0, Math.min(1, Number(value))) : fallback;
+  return Number.isFinite(Number(value))
+    ? Math.max(0, Math.min(1, Number(value)))
+    : fallback;
 }
 
 function assertSourceId(sourceId) {
@@ -292,7 +314,9 @@ function compareStableKeys(a, b) {
 }
 
 function compareProtectedEntries(a, b) {
-  return b.priority - a.priority || compareStableKeys(a._overlayKey, b._overlayKey);
+  return (
+    b.priority - a.priority || compareStableKeys(a._overlayKey, b._overlayKey)
+  );
 }
 
 function compareProtectedCandidates(a, b) {
@@ -300,7 +324,9 @@ function compareProtectedCandidates(a, b) {
 }
 
 function comparePaintItems(a, b) {
-  return a.lane - b.lane || a.zIndex - b.zIndex || compareStableKeys(a.key, b.key);
+  return (
+    a.lane - b.lane || a.zIndex - b.zIndex || compareStableKeys(a.key, b.key)
+  );
 }
 
 /**
@@ -346,9 +372,12 @@ function defaultCollisionGroup(variant) {
 
 /** Resolve an entry to one of the seven binding paint lanes. */
 export function paintLaneForOverlayEntry(entry = {}) {
-  if (PAINT_LANE_INDEX.has(entry.paintLane)) return PAINT_LANE_INDEX.get(entry.paintLane);
-  if (entry.tracked || entry.variant === 'tracked') return PAINT_LANE_INDEX.get('tracked');
-  if (entry.selected || entry.variant === 'selected') return PAINT_LANE_INDEX.get('selected');
+  if (PAINT_LANE_INDEX.has(entry.paintLane))
+    return PAINT_LANE_INDEX.get(entry.paintLane);
+  if (entry.tracked || entry.variant === 'tracked')
+    return PAINT_LANE_INDEX.get('tracked');
+  if (entry.selected || entry.variant === 'selected')
+    return PAINT_LANE_INDEX.get('selected');
   if (entry.variant === 'thumbnail') return PAINT_LANE_INDEX.get('thumbnail');
   if (entry.variant === 'card') return PAINT_LANE_INDEX.get('ambient-card');
   if (entry.variant === 'track') return PAINT_LANE_INDEX.get('ambient-track');
@@ -376,12 +405,12 @@ export function paintLaneForOverlayEntry(entry = {}) {
  *   invoked once rather than once per validated component;
  * - a throwing accessor is contained here — it degrades that one entry to
  *   "no cull anchor" instead of aborting normalization for the whole source;
- * - the components are copied into a fresh Cartesian3, so a caller mutating
+ * - the components are copied into a fresh vector, so a caller mutating
  *   or recycling its own vector after publishing cannot feed NaN (or a moved
  *   point) to the per-frame occluder.
  *
  * @param {object} entry - Raw source entry.
- * @returns {?Cesium.Cartesian3} Host-owned lifted anchor, or null.
+ * @returns {?{x: number, y: number, z: number}} Host-owned lifted anchor, or null.
  */
 function snapshotCullPosition(entry) {
   let candidate;
@@ -392,20 +421,28 @@ function snapshotCullPosition(entry) {
   }
   if (!candidate || typeof candidate !== 'object') return null;
   const { x, y, z } = candidate;
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
-  return new Cesium.Cartesian3(x, y, z);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z))
+    return null;
+  return { x, y, z };
 }
 
 export function normalizeOverlayEntry(sourceId, entry) {
   const source = assertSourceId(sourceId);
-  if (!entry || typeof entry !== 'object') throw new TypeError('WorldOverlay entry must be an object');
+  if (!entry || typeof entry !== 'object')
+    throw new TypeError('WorldOverlay entry must be an object');
   const id = typeof entry.id === 'string' ? entry.id.trim() : '';
-  if (!id) throw new TypeError('WorldOverlay entry.id must be a non-empty string');
-  const validPosition = typeof entry.position === 'function'
-    || (entry.position && Number.isFinite(entry.position.x)
-      && Number.isFinite(entry.position.y) && Number.isFinite(entry.position.z));
+  if (!id)
+    throw new TypeError('WorldOverlay entry.id must be a non-empty string');
+  const validPosition =
+    typeof entry.position === 'function' ||
+    (entry.position &&
+      Number.isFinite(entry.position.x) &&
+      Number.isFinite(entry.position.y) &&
+      Number.isFinite(entry.position.z));
   if (!validPosition) {
-    throw new TypeError(`WorldOverlay entry ${source}:${id} requires a Cartesian position or getter`);
+    throw new TypeError(
+      `WorldOverlay entry ${source}:${id} requires a Cartesian position or getter`,
+    );
   }
   const variant = String(entry.variant || 'label');
   if (!VALID_VARIANTS.has(variant)) {
@@ -418,16 +455,27 @@ export function normalizeOverlayEntry(sourceId, entry) {
     cullPosition: snapshotCullPosition(entry),
     variant,
     title: String(entry.title ?? ''),
-    details: Array.isArray(entry.details) ? entry.details.map((line) => String(line)) : [],
+    details: Array.isArray(entry.details)
+      ? entry.details.map((line) => String(line))
+      : [],
     accent: entry.accent || WORLD_OVERLAY_STYLE.accent,
     paintLane: entry.paintLane,
-    priority: Number.isFinite(Number(entry.priority)) ? Number(entry.priority) : 0,
+    priority: Number.isFinite(Number(entry.priority))
+      ? Number(entry.priority)
+      : 0,
     selected: entry.selected === true,
     pinned: entry.pinned === true,
     protected: entry.protected === true,
     tracked: entry.tracked === true || variant === 'tracked',
     active: entry.active === true,
-    collisionGroup: String(entry.collisionGroup || defaultCollisionGroup(variant)),
+    collisionGroup: String(
+      entry.collisionGroup || defaultCollisionGroup(variant),
+    ),
+    // Optional lower-priority content must fit around the actual painted
+    // members of another domain, including its sticky positions and exit fades.
+    yieldToCollisionGroup: entry.yieldToCollisionGroup
+      ? String(entry.yieldToCollisionGroup)
+      : null,
     // Explicit field pick rather than `{ ...entry, variant }`: the lane
     // resolver reads only these four, and a full spread re-invokes every
     // accessor the source put on its entry (a throwing one would abort
@@ -435,37 +483,79 @@ export function normalizeOverlayEntry(sourceId, entry) {
     zIndex: Number.isFinite(Number(entry.zIndex))
       ? Number(entry.zIndex)
       : paintLaneForOverlayEntry({
-        paintLane: entry.paintLane,
-        tracked: entry.tracked,
-        selected: entry.selected,
-        variant,
-      }) * 10,
+          paintLane: entry.paintLane,
+          tracked: entry.tracked,
+          selected: entry.selected,
+          variant,
+        }) * 10,
     interactive: entry.interactive === true,
     accessibilityLabel: String(entry.accessibilityLabel || '').trim(),
     activate: typeof entry.activate === 'function' ? entry.activate : null,
-    minDistance: Number.isFinite(Number(entry.minDistance)) ? Math.max(0, Number(entry.minDistance)) : 0,
-    maxDistance: Number.isFinite(Number(entry.maxDistance)) ? Math.max(0, Number(entry.maxDistance)) : Number.POSITIVE_INFINITY,
-    distanceFadeStartRatio: Number.isFinite(Number(entry.distanceFadeStartRatio))
+    minDistance: Number.isFinite(Number(entry.minDistance))
+      ? Math.max(0, Number(entry.minDistance))
+      : 0,
+    maxDistance: Number.isFinite(Number(entry.maxDistance))
+      ? Math.max(0, Number(entry.maxDistance))
+      : Number.POSITIVE_INFINITY,
+    distanceFadeStartRatio: Number.isFinite(
+      Number(entry.distanceFadeStartRatio),
+    )
       ? Math.max(0, Math.min(1, Number(entry.distanceFadeStartRatio)))
       : 0.7,
     distanceScale: normalizeDistanceScale(entry.distanceScale),
     altitudeScale: normalizeAltitudeScale(entry.altitudeScale),
-    minAltitude: Number.isFinite(Number(entry.minAltitude)) ? Number(entry.minAltitude) : Number.NEGATIVE_INFINITY,
+    minAltitude: Number.isFinite(Number(entry.minAltitude))
+      ? Number(entry.minAltitude)
+      : Number.NEGATIVE_INFINITY,
     altitudeFadeStart: Number.isFinite(Number(entry.altitudeFadeStart))
       ? Number(entry.altitudeFadeStart)
       : Number.POSITIVE_INFINITY,
     altitudeFadeEnd: Number.isFinite(Number(entry.altitudeFadeEnd))
       ? Number(entry.altitudeFadeEnd)
       : Number.POSITIVE_INFINITY,
-    edgeFade: entry.edgeFade === false || entry.edgeFade === 'none' ? 'none' : 'keyhole',
+    edgeFade:
+      entry.edgeFade === false || entry.edgeFade === 'none'
+        ? 'none'
+        : 'keyhole',
     horizonCull: entry.horizonCull !== false,
     terrainOcclusion: entry.terrainOcclusion === true,
-    sourceAlpha: clamp01(entry.sourceAlpha ?? entry.alpha, 1),
+    sourceAlpha:
+      typeof (entry.sourceAlpha ?? entry.alpha) === 'function'
+        ? (entry.sourceAlpha ?? entry.alpha)
+        : clamp01(entry.sourceAlpha ?? entry.alpha, 1),
+    presentationScale:
+      typeof entry.presentationScale === 'function'
+        ? entry.presentationScale
+        : Math.max(0, Number(entry.presentationScale) || 1),
+    leaderProgress:
+      typeof entry.leaderProgress === 'function'
+        ? entry.leaderProgress
+        : clamp01(entry.leaderProgress, 1),
+    contentAlpha:
+      typeof entry.contentAlpha === 'function'
+        ? entry.contentAlpha
+        : clamp01(entry.contentAlpha, 1),
+    anchorDot: entry.anchorDot === true,
+    leaderStyle: entry.leaderStyle === 'elbow' ? 'elbow' : 'straight',
     temporalAlpha: clamp01(entry.temporalAlpha, 1),
-    gapPx: Number.isFinite(Number(entry.gapPx)) ? Math.max(0, Number(entry.gapPx)) : 12,
+    gapPx: Number.isFinite(Number(entry.gapPx))
+      ? Math.max(0, Number(entry.gapPx))
+      : 12,
     leaderOffsetPx: Number.isFinite(Number(entry.leaderOffsetPx))
       ? Math.max(0, Number(entry.leaderOffsetPx))
       : 0,
+    leaderStyle: entry.leaderStyle === 'elbow' ? 'elbow' : 'straight',
+    leaderAnimationMs: Number.isFinite(Number(entry.leaderAnimationMs))
+      ? Math.max(0, Number(entry.leaderAnimationMs))
+      : 0,
+    leaderAnimationStartedAt: Number.isFinite(
+      Number(entry.leaderAnimationStartedAt),
+    )
+      ? Number(entry.leaderAnimationStartedAt)
+      : 0,
+    leaderDrawRatio: Number.isFinite(Number(entry.leaderDrawRatio))
+      ? Math.max(0.1, Math.min(0.9, Number(entry.leaderDrawRatio)))
+      : 0.68,
     anchorRadiusPx: Number.isFinite(Number(entry.anchorRadiusPx))
       ? Math.max(0, Number(entry.anchorRadiusPx))
       : 0,
@@ -508,12 +598,15 @@ export function normalizeOverlayEntry(sourceId, entry) {
     metadata: entry.metadata ?? null,
     thumbnailWidth: entry.thumbnailWidth,
     thumbnailHeight: entry.thumbnailHeight,
+    thumbnailFit: entry.thumbnailFit === 'contain' ? 'contain' : null,
+    thumbnailFixedWidth: entry.thumbnailFixedWidth === true,
     thumbnailPadX: entry.thumbnailPadX,
     thumbnailPadTop: entry.thumbnailPadTop,
     thumbnailPadBottom: entry.thumbnailPadBottom,
     thumbnailTitleGap: entry.thumbnailTitleGap,
     thumbnailTitleHeight: entry.thumbnailTitleHeight,
     thumbnailTitleChars: entry.thumbnailTitleChars,
+    thumbnailTitleWordBoundary: entry.thumbnailTitleWordBoundary === true,
     thumbnailBackground: entry.thumbnailBackground,
     thumbnailTitleColor: entry.thumbnailTitleColor,
     thumbnailTitleFont: entry.thumbnailTitleFont,
@@ -525,29 +618,45 @@ export function normalizeOverlayEntry(sourceId, entry) {
     _overlayTrackDisplayTitle: null,
     _overlayTrackDisplayDetail: null,
     _overlayTrackDisplayText: '',
-    _overlayThumbnailTitle: variant === 'thumbnail'
-      ? String(entry.title ?? '').toUpperCase().slice(
-        0,
-        Math.max(0, Math.floor(Number(entry.thumbnailTitleChars) || 0)) || undefined,
-      )
-      : '',
+    _overlayThumbnailTitle:
+      variant === 'thumbnail'
+        ? entry.thumbnailTitleWordBoundary === true
+          ? truncateOverlayTitle(
+              String(entry.title ?? '').toUpperCase(),
+              Math.max(0, Math.floor(Number(entry.thumbnailTitleChars) || 0)) ||
+                Infinity,
+            )
+          : String(entry.title ?? '')
+              .toUpperCase()
+              .slice(
+                0,
+                Math.max(
+                  0,
+                  Math.floor(Number(entry.thumbnailTitleChars) || 0),
+                ) || undefined,
+              )
+        : '',
   };
   normalized._overlayKey = entryKey(source, id);
   normalized._cohortPriority = normalized.priority;
   normalized._cohortBand = 0;
   normalized._cohortHash = stableIdentityHash(source, id);
   normalized._cohortSourceId = id;
-  normalized._overlayImageSlot = normalized.requireImage && normalized.image
-    && Object.prototype.hasOwnProperty.call(normalized.image, 'frame')
-    ? normalized.image
-    : null;
+  normalized._overlayImageSlot =
+    normalized.requireImage &&
+    normalized.image &&
+    Object.prototype.hasOwnProperty.call(normalized.image, 'frame')
+      ? normalized.image
+      : null;
   normalized._overlayLayout = {};
   return normalized;
 }
 
 function normalizeDistanceScale(curve) {
   if (!curve || typeof curve !== 'object') return null;
-  const values = [curve.near, curve.nearValue, curve.far, curve.farValue].map(Number);
+  const values = [curve.near, curve.nearValue, curve.far, curve.farValue].map(
+    Number,
+  );
   if (!values.every(Number.isFinite)) return null;
   const near = Math.max(0, values[0]);
   const nearValue = Math.max(0, values[1]);
@@ -558,7 +667,13 @@ function normalizeDistanceScale(curve) {
 
 function normalizeAltitudeScale(curve) {
   if (!curve || typeof curve !== 'object') return null;
-  const values = [curve.fullEnd, curve.midEnd, curve.end, curve.midValue, curve.endValue].map(Number);
+  const values = [
+    curve.fullEnd,
+    curve.midEnd,
+    curve.end,
+    curve.midValue,
+    curve.endValue,
+  ].map(Number);
   if (!values.every(Number.isFinite)) return null;
   const fullEnd = Math.max(0, values[0]);
   const midEnd = Math.max(fullEnd, values[1]);
@@ -574,30 +689,65 @@ function normalizeAltitudeScale(curve) {
 }
 
 function normalizeSourceOptions(options = {}, previous = {}) {
-  const requestedCapacity = Number(options.collisionCapacity ?? previous.collisionCapacity);
+  const requestedCapacity = Number(
+    options.collisionCapacity ?? previous.collisionCapacity,
+  );
   return {
-    visible: options.visible !== undefined ? options.visible !== false : previous.visible !== false,
-    hideInCockpit: options.hideInCockpit !== undefined
-      ? options.hideInCockpit === true
-      : previous.hideInCockpit === true,
+    visible:
+      options.visible !== undefined
+        ? options.visible !== false
+        : previous.visible !== false,
+    hideInCockpit:
+      options.hideInCockpit !== undefined
+        ? options.hideInCockpit === true
+        : previous.hideInCockpit === true,
     alpha: clamp01(options.alpha, previous.alpha ?? 1),
-    cohortLimit: Math.max(1, Math.min(
-      MAX_SOURCE_COHORT_LIMIT,
-      Math.floor(Number(options.cohortLimit ?? previous.cohortLimit) || DEFAULT_COHORT_LIMIT),
-    )),
+    cohortLimit: Math.max(
+      1,
+      Math.min(
+        MAX_SOURCE_COHORT_LIMIT,
+        Math.floor(
+          Number(options.cohortLimit ?? previous.cohortLimit) ||
+            DEFAULT_COHORT_LIMIT,
+        ),
+      ),
+    ),
     collisionCapacity: Number.isFinite(requestedCapacity)
       ? Math.max(0, Math.floor(requestedCapacity))
       : DEFAULT_COLLISION_CAPACITY,
-    moving: options.moving !== undefined ? options.moving === true : previous.moving === true,
-    solveIntervalMs: Math.max(0, Number(
-      options.solveIntervalMs ?? previous.solveIntervalMs ?? DEFAULT_MOVING_SOLVE_MS,
-    ) || 0),
+    maxVisible: Math.max(
+      0,
+      options.maxVisible ?? previous.maxVisible ?? Infinity,
+    ),
+    moving:
+      options.moving !== undefined
+        ? options.moving === true
+        : previous.moving === true,
+    solveIntervalMs: Math.max(
+      0,
+      Number(
+        options.solveIntervalMs ??
+          previous.solveIntervalMs ??
+          DEFAULT_MOVING_SOLVE_MS,
+      ) || 0,
+    ),
+    onVisibilityChange:
+      options.onVisibilityChange === undefined
+        ? previous.onVisibilityChange || null
+        : typeof options.onVisibilityChange === 'function'
+          ? options.onVisibilityChange
+          : null,
   };
 }
 
 function isProtected(entry) {
-  return entry.selected || entry.pinned || entry.protected || entry.tracked
-    || paintLaneForOverlayEntry(entry) >= PAINT_LANE_INDEX.get('selected');
+  return (
+    entry.selected ||
+    entry.pinned ||
+    entry.protected ||
+    entry.tracked ||
+    paintLaneForOverlayEntry(entry) >= PAINT_LANE_INDEX.get('selected')
+  );
 }
 
 /**
@@ -608,8 +758,18 @@ function isProtected(entry) {
  * @param {Set<string>} [incumbentKeys]
  * @returns {Array<WorldOverlayEntry>}
  */
-export function selectBoundedOverlayCohort(entries, limit = DEFAULT_COHORT_LIMIT, incumbentKeys = new Set()) {
-  const cap = Math.max(1, Math.min(MAX_SOURCE_COHORT_LIMIT, Math.floor(Number(limit) || DEFAULT_COHORT_LIMIT)));
+export function selectBoundedOverlayCohort(
+  entries,
+  limit = DEFAULT_COHORT_LIMIT,
+  incumbentKeys = new Set(),
+) {
+  const cap = Math.max(
+    1,
+    Math.min(
+      MAX_SOURCE_COHORT_LIMIT,
+      Math.floor(Number(limit) || DEFAULT_COHORT_LIMIT),
+    ),
+  );
   const protectedEntries = [];
   const bounded = new BoundedCohort(cap, MAX_SOURCE_COHORT_LIMIT);
   for (const entry of Array.isArray(entries) ? entries : []) {
@@ -618,14 +778,19 @@ export function selectBoundedOverlayCohort(entries, limit = DEFAULT_COHORT_LIMIT
       protectedEntries.push(entry);
       continue;
     }
-    bounded.consider(entry, incumbentKeys.has(entry._overlayKey) || incumbentKeys.has(entry.id));
+    bounded.consider(
+      entry,
+      incumbentKeys.has(entry._overlayKey) || incumbentKeys.has(entry.id),
+    );
   }
   protectedEntries.sort(compareProtectedEntries);
   return protectedEntries.concat(bounded.values(cap));
 }
 
 function sourceActive(source) {
-  return source.options.visible && !(_cockpitActive && source.options.hideInCockpit);
+  return (
+    source.options.visible && !(_cockpitActive && source.options.hideInCockpit)
+  );
 }
 
 function getOrCreateDomain(domainId) {
@@ -650,6 +815,7 @@ function getOrCreateDomain(domainId) {
       sepCount: 0,
       renderEntries: [],
       demandBySource: new Map(),
+      limitsBySource: new Map(),
       capacity: DEFAULT_COLLISION_CAPACITY,
       lastSolveAt: Number.NEGATIVE_INFINITY,
       moving: false,
@@ -701,6 +867,7 @@ function getOrCreateSource(sourceId, options = {}) {
       cohortLists: [],
       cohortCount: 0,
       demandByDomain: new Map(),
+      visibleIds: new Set(),
       options: normalizeSourceOptions(options),
     };
     _sources.set(id, source);
@@ -711,14 +878,21 @@ function getOrCreateSource(sourceId, options = {}) {
   return source;
 }
 
+/** Ask the renderer for a frame, for the overlay to paint again. */
+function requestOverlayRender() {
+  _frame?.requestRender('world-overlay');
+}
+
 function invalidateHost({ solve = true, layout = false } = {}) {
   if (solve) _solveDirty = true;
   if (layout) _occludersDirty = true;
   _canvasNeedsClear = true;
   _paintRectCount = 0;
-  _hitRectCount = 0;
+  // Hit rectangles stay what is painted on screen until the next paint
+  // rebuilds them: every click subscriber reads the same overlay, even after
+  // an earlier one republishes entries in that click (a selection card).
   _paintRectByKey.clear();
-  _viewer?.scene?.requestRender?.();
+  requestOverlayRender();
 }
 
 function inertPaintLaneHandle() {
@@ -742,7 +916,9 @@ export function registerWorldOverlayPaintLane(laneId, painter, options = {}) {
     throw new TypeError(`Unsupported WorldOverlay paint lane: ${laneId}`);
   }
   if (typeof painter !== 'function') {
-    throw new TypeError('WorldOverlay custom paint lane requires a painter callback');
+    throw new TypeError(
+      'WorldOverlay custom paint lane requires a painter callback',
+    );
   }
   const id = assertSourceId(options.id || laneId);
   const previous = _customPaintLanes.get(id);
@@ -755,10 +931,12 @@ export function registerWorldOverlayPaintLane(laneId, painter, options = {}) {
     lane: PAINT_LANE_INDEX.get(laneId),
     painter,
     active: options.active === true,
-    target: options.target === PAINT_TARGET_DETECTION
-      ? PAINT_TARGET_DETECTION
-      : PAINT_TARGET_SHARED,
-    shouldPaint: typeof options.shouldPaint === 'function' ? options.shouldPaint : null,
+    target:
+      options.target === PAINT_TARGET_DETECTION
+        ? PAINT_TARGET_DETECTION
+        : PAINT_TARGET_SHARED,
+    shouldPaint:
+      typeof options.shouldPaint === 'function' ? options.shouldPaint : null,
   };
   _customPaintLanes.set(id, record);
   _customPaintLaneList.push(record);
@@ -774,7 +952,9 @@ export function registerWorldOverlayPaintLane(laneId, painter, options = {}) {
   };
   return {
     get surface() {
-      return record.target === PAINT_TARGET_DETECTION ? _detectionSurface : _canvas;
+      return record.target === PAINT_TARGET_DETECTION
+        ? _detectionSurface
+        : _canvas;
     },
     setActive(active) {
       if (_destroyed || _customPaintLanes.get(id) !== record) return;
@@ -799,13 +979,19 @@ export function registerWorldOverlayPaintLane(laneId, painter, options = {}) {
  */
 export function setOverlayEntries(sourceId, entries, options = {}) {
   if (_destroyed) return;
-  if (!Array.isArray(entries)) throw new TypeError('WorldOverlay entries must be an array');
+  if (!Array.isArray(entries))
+    throw new TypeError('WorldOverlay entries must be an array');
   const source = getOrCreateSource(sourceId, options);
-  const normalized = entries.map((entry) => normalizeOverlayEntry(source.id, entry));
+  const normalized = entries.map((entry) =>
+    normalizeOverlayEntry(source.id, entry),
+  );
   const next = new Map();
   for (const entry of normalized) next.set(entry.id, entry);
   for (const entry of source.entries.values()) {
     if (!next.has(entry.id)) _records.delete(entry._overlayKey);
+    const replacement = next.get(entry.id);
+    if (replacement && isProtected(entry) !== isProtected(replacement))
+      getOrCreateDomain(entry.collisionGroup).arbiter.remove(entry._overlayKey);
   }
   source.entries = next;
   rebuildSourceCohorts(source);
@@ -857,7 +1043,8 @@ export function clearOverlaySource(sourceId) {
   if (_destroyed) return false;
   const source = _sources.get(assertSourceId(sourceId));
   if (!source) return false;
-  for (const entry of source.entries.values()) _records.delete(entry._overlayKey);
+  for (const entry of source.entries.values())
+    _records.delete(entry._overlayKey);
   source.entries.clear();
   source.cohortDomainIds.length = 0;
   source.cohortLists.length = 0;
@@ -910,6 +1097,32 @@ export function getOverlayPaintRect(sourceId, entryId) {
 }
 
 /**
+ * Opacity an entry paints with this frame, or 0 when it is not queued or the
+ * yield-collision pass hid it. Custom lanes may call it before later lanes
+ * publish paint rects. Leaves out the sonar fade.
+ * @param {string} sourceId
+ * @param {string} entryId
+ * @returns {number}
+ */
+export function getQueuedOverlayEntryAlpha(sourceId, entryId) {
+  if (_destroyed) return 0;
+  const item = _queuedItemBySource.get(sourceId)?.get(entryId);
+  // Pooled items are reassigned every frame: check the frame and the entry.
+  if (!item || item.stamp !== _frameStamp) return 0;
+  // Declutter has already run when custom lanes call this.
+  if (item.collisionHidden) return 0;
+  const record = item.record;
+  if (record.entry.id !== entryId || record.entry.source !== sourceId) return 0;
+  return (
+    record.sourceAlpha *
+    item.temporalAlpha *
+    record.distanceAlpha *
+    record.altitudeAlpha *
+    (_keyhole ? entryKeyholeAlpha(record.entry, item.placement, _keyhole) : 1)
+  );
+}
+
+/**
  * Resolve the topmost interactive world-overlay entry at CSS-pixel coords.
  * @param {number} x
  * @param {number} y
@@ -921,10 +1134,21 @@ export function hitTestWorldOverlay(x, y, options = {}) {
   for (let i = _hitRectCount - 1; i >= 0; i--) {
     const hit = _hitRects[i];
     if (options.sourceId && hit.sourceId !== options.sourceId) continue;
-    if (options.collisionGroup && hit.entry.collisionGroup !== options.collisionGroup) continue;
-    if (typeof options.filter === 'function' && !options.filter(hit.entry)) continue;
-    if (x < hit.x || x > hit.x + hit.w || y < hit.y || y > hit.y + hit.h) continue;
-    return { sourceId: hit.sourceId, entryId: hit.entryId, entry: hit.entry, rect: hit };
+    if (
+      options.collisionGroup &&
+      hit.entry.collisionGroup !== options.collisionGroup
+    )
+      continue;
+    if (typeof options.filter === 'function' && !options.filter(hit.entry))
+      continue;
+    if (x < hit.x || x > hit.x + hit.w || y < hit.y || y > hit.y + hit.h)
+      continue;
+    return {
+      sourceId: hit.sourceId,
+      entryId: hit.entryId,
+      entry: hit.entry,
+      rect: hit,
+    };
   }
   return null;
 }
@@ -950,45 +1174,69 @@ export function getWorldOverlayDiagnostics() {
  * (see normalizeOverlayEntry) so a sub-ellipsoid render anchor is not
  * false-hidden near the limb; everything else still uses the render position.
  */
-export function isOverlayPointVisible(entry, position, screen, viewport, occluder) {
-  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) {
+export function isOverlayPointVisible(
+  entry,
+  position,
+  screen,
+  viewport,
+  occluder,
+) {
+  if (
+    !position ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y) ||
+    !Number.isFinite(position.z)
+  ) {
     return false;
   }
-  if (entry?.horizonCull !== false && occluder?.isPointVisible
-    && !occluder.isPointVisible(entry?.cullPosition || position)) {
+  if (
+    entry?.horizonCull !== false &&
+    occluder?.isPointVisible &&
+    !occluder.isPointVisible(entry?.cullPosition || position)
+  ) {
     return false;
   }
   const x = screen?.x;
   const y = screen?.y;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
   const padding = Math.max(0, Number(entry?.viewportPadding) || 0);
-  return x >= -padding && x <= viewport.width + padding
-    && y >= -padding && y <= viewport.height + padding;
+  return (
+    x >= -padding &&
+    x <= viewport.width + padding &&
+    y >= -padding &&
+    y <= viewport.height + padding
+  );
 }
 
 /**
  * Return true when a rectangle intersects any cached UI exclusion box.
  * `count` lets pooled buffers expose a live prefix without truncating.
  */
-export function overlayRectIntersectsAny(rect, exclusions, count = exclusions.length) {
+function overlayRectIntersectsAny(rect, exclusions, count = exclusions.length) {
   for (let i = 0; i < count; i++) {
-    const other = exclusions[i];
-    if (rect.x < other.x + other.w && rect.x + rect.w > other.x
-      && rect.y < other.y + other.h && rect.y + rect.h > other.y) return true;
+    if (overlayRectsOverlap(rect, exclusions[i])) return true;
   }
   return false;
+}
+
+function overlayRectsOverlap(a, b) {
+  return (
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+  );
 }
 
 /**
  * Like `overlayRectIntersectsAny`, but only against exclusions that composite
  * BELOW the host — the ones a placement may never overlap at any cost.
  */
-export function overlayRectIntersectsAnyHard(rect, exclusions, count = exclusions.length) {
+function overlayRectIntersectsAnyHard(
+  rect,
+  exclusions,
+  count = exclusions.length,
+) {
   for (let i = 0; i < count; i++) {
     const other = exclusions[i];
-    if (!other.hard) continue;
-    if (rect.x < other.x + other.w && rect.x + rect.w > other.x
-      && rect.y < other.y + other.h && rect.y + rect.h > other.y) return true;
+    if (other.hard && overlayRectsOverlap(rect, other)) return true;
   }
   return false;
 }
@@ -1003,8 +1251,12 @@ function leastOverlappingPlacement(placements, exclusions, count) {
     let overlapArea = 0;
     for (let j = 0; j < count; j++) {
       const other = exclusions[j];
-      const overlapW = Math.min(rect.x + rect.w, other.x + other.w) - Math.max(rect.x, other.x);
-      const overlapH = Math.min(rect.y + rect.h, other.y + other.h) - Math.max(rect.y, other.y);
+      const overlapW =
+        Math.min(rect.x + rect.w, other.x + other.w) -
+        Math.max(rect.x, other.x);
+      const overlapH =
+        Math.min(rect.y + rect.h, other.y + other.h) -
+        Math.max(rect.y, other.y);
       if (overlapW > 0 && overlapH > 0) overlapArea += overlapW * overlapH;
     }
     if (overlapArea < bestArea) {
@@ -1022,10 +1274,13 @@ function ensureOverlayDom() {
     _root.id = ROOT_ID;
     _root.setAttribute('aria-hidden', 'true');
     const parent = _viewer.container?.parentElement || document.body;
-    if (_viewer.container?.nextSibling) parent.insertBefore(_root, _viewer.container.nextSibling);
+    if (_viewer.container?.nextSibling)
+      parent.insertBefore(_root, _viewer.container.nextSibling);
     else parent.appendChild(_root);
   }
-  _canvas = _root.querySelector?.(`#${CANVAS_ID}`) || document.getElementById(CANVAS_ID);
+  _canvas =
+    _root.querySelector?.(`#${CANVAS_ID}`) ||
+    document.getElementById(CANVAS_ID);
   if (!_canvas) {
     _canvas = document.createElement('canvas');
     _canvas.id = CANVAS_ID;
@@ -1041,8 +1296,9 @@ function ensureOverlayDom() {
   // `'screen'`. Paint order is expressed purely by z-index: this surface is
   // z5, the shared card canvas inside the root is z6.
   const detectionParent = _viewer?.container || document.body;
-  _detectionSurface = detectionParent.querySelector?.(`#${DETECTION_SURFACE_ID}`)
-    || document.getElementById(DETECTION_SURFACE_ID);
+  _detectionSurface =
+    detectionParent.querySelector?.(`#${DETECTION_SURFACE_ID}`) ||
+    document.getElementById(DETECTION_SURFACE_ID);
   if (!_detectionSurface) {
     _detectionSurface = document.createElement('canvas');
     _detectionSurface.id = DETECTION_SURFACE_ID;
@@ -1053,39 +1309,23 @@ function ensureOverlayDom() {
   _root.setAttribute('aria-hidden', 'true');
   _canvas.setAttribute('aria-hidden', 'true');
   _detectionSurface.setAttribute('aria-hidden', 'true');
-  _accessibilityRoot = document.getElementById(ACCESSIBILITY_ROOT_ID);
-  if (!_accessibilityRoot) {
-    _accessibilityRoot = document.createElement('div');
-    _accessibilityRoot.id = ACCESSIBILITY_ROOT_ID;
-    _accessibilityRoot.className = 'world-overlay-accessibility';
-    _accessibilityRoot.setAttribute('role', 'region');
-    _accessibilityRoot.setAttribute('aria-label', 'Visible map targets');
-    document.body.appendChild(_accessibilityRoot);
-  }
-  _accessibilityList = document.getElementById(ACCESSIBILITY_LIST_ID);
-  if (!_accessibilityList) {
-    _accessibilityList = document.createElement('div');
-    _accessibilityList.id = ACCESSIBILITY_LIST_ID;
-    _accessibilityRoot.appendChild(_accessibilityList);
-  }
-  _accessibilityStatus = document.getElementById(ACCESSIBILITY_STATUS_ID);
-  if (!_accessibilityStatus) {
-    _accessibilityStatus = document.createElement('div');
-    _accessibilityStatus.id = ACCESSIBILITY_STATUS_ID;
-    _accessibilityStatus.setAttribute('role', 'status');
-    _accessibilityStatus.setAttribute('aria-live', 'polite');
-    _accessibilityStatus.setAttribute('aria-atomic', 'true');
-    _accessibilityRoot.appendChild(_accessibilityStatus);
-  }
-  _ctx = _canvas.getContext('2d', { alpha: true, desynchronized: true });
-  _detectionCtx = _detectionSurface.getContext('2d', { alpha: true, desynchronized: true });
+  // Each host owns its action list; a click from an earlier host's list is
+  // ignored.
+  if (!_actions)
+    presentActions({ owner: {}, items: [], status: '', announced: 0 });
+  // Synchronized contexts: on a desynchronized one Chrome can present an
+  // earlier buffer after a frame that only clears, so cards that left stay
+  // on screen until something paints over them.
+  _ctx = _canvas.getContext('2d', { alpha: true });
+  _detectionCtx = _detectionSurface.getContext('2d', { alpha: true });
 }
 
 function sizeCanvasSurface(canvas, ctx, width, height, dpr) {
   if (!canvas) return false;
   const backingWidth = Math.round(width * dpr);
   const backingHeight = Math.round(height * dpr);
-  const changed = canvas.width !== backingWidth || canvas.height !== backingHeight;
+  const changed =
+    canvas.width !== backingWidth || canvas.height !== backingHeight;
   if (changed) {
     canvas.width = backingWidth;
     canvas.height = backingHeight;
@@ -1103,15 +1343,20 @@ function sizeCanvasSurface(canvas, ctx, width, height, dpr) {
  * that actually has paint work.
  */
 function ensureCanvasSize() {
-  if (!_canvas || !_viewer?.canvas) return false;
-  const width = Math.max(0, Math.round(Number(_viewer.canvas.clientWidth) || 0));
-  const height = Math.max(0, Math.round(Number(_viewer.canvas.clientHeight) || 0));
+  // The renderer's canvas; a viewer with no renderer bound, its own.
+  const sceneCanvas = canvasOf(_viewer);
+  if (!_canvas || !sceneCanvas) return false;
+  const width = Math.max(0, Math.round(Number(sceneCanvas.clientWidth) || 0));
+  const height = Math.max(0, Math.round(Number(sceneCanvas.clientHeight) || 0));
   const dpr = Math.max(1, Number(globalThis.window?.devicePixelRatio) || 1);
-  const changed = _canvas.width !== Math.round(width * dpr)
-    || _canvas.height !== Math.round(height * dpr)
-    || _detectionSurface?.width !== Math.round(width * dpr)
-    || _detectionSurface?.height !== Math.round(height * dpr)
-    || _canvasWidth !== width || _canvasHeight !== height || _canvasDpr !== dpr;
+  const changed =
+    _canvas.width !== Math.round(width * dpr) ||
+    _canvas.height !== Math.round(height * dpr) ||
+    _detectionSurface?.width !== Math.round(width * dpr) ||
+    _detectionSurface?.height !== Math.round(height * dpr) ||
+    _canvasWidth !== width ||
+    _canvasHeight !== height ||
+    _canvasDpr !== dpr;
   _resizeDirty = false;
   if (!changed) return false;
   sizeCanvasSurface(_detectionSurface, _detectionCtx, width, height, dpr);
@@ -1140,21 +1385,27 @@ function ensureCanvasSize() {
 function elementIsVisible(element) {
   if (!element || element.hidden) return false;
   if (typeof element.checkVisibility === 'function') {
-    return element.checkVisibility({
-      contentVisibilityAuto: true,
-      // The spec renamed these; pass both spellings so the check keeps its
-      // opacity/visibility coverage on either engine vintage. Unknown keys are
-      // ignored, and every option defaults to false, so a missing alias would
-      // silently weaken the test rather than throw.
-      opacityProperty: true,
-      visibilityProperty: true,
-      checkOpacity: true,
-      checkVisibilityCSS: true,
-    }) !== false;
+    return (
+      element.checkVisibility({
+        contentVisibilityAuto: true,
+        // The spec renamed these; pass both spellings so the check keeps its
+        // opacity/visibility coverage on either engine vintage. Unknown keys are
+        // ignored, and every option defaults to false, so a missing alias would
+        // silently weaken the test rather than throw.
+        opacityProperty: true,
+        visibilityProperty: true,
+        checkOpacity: true,
+        checkVisibilityCSS: true,
+      }) !== false
+    );
   }
   const style = globalThis.window?.getComputedStyle?.(element);
   if (!style) return true;
-  return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0;
+  return (
+    style.display !== 'none' &&
+    style.visibility !== 'hidden' &&
+    Number(style.opacity) !== 0
+  );
 }
 
 /**
@@ -1218,10 +1469,13 @@ function refreshUiOccluders(timestamp, force = false) {
   const elapsed = timestamp - _occludersUpdatedAt;
   if (!force && elapsed < OCCLUDER_REFRESH_MS) {
     if (_occluderRefreshTimer == null && typeof setTimeout === 'function') {
-      _occluderRefreshTimer = setTimeout(() => {
-        _occluderRefreshTimer = null;
-        _viewer?.scene?.requestRender?.();
-      }, Math.max(0, OCCLUDER_REFRESH_MS - elapsed));
+      _occluderRefreshTimer = setTimeout(
+        () => {
+          _occluderRefreshTimer = null;
+          requestOverlayRender();
+        },
+        Math.max(0, OCCLUDER_REFRESH_MS - elapsed),
+      );
     }
     return false;
   }
@@ -1231,8 +1485,9 @@ function refreshUiOccluders(timestamp, force = false) {
   const canvasRect = _canvas.getBoundingClientRect?.() || { left: 0, top: 0 };
   const seen = new Set();
   for (const selector of WORLD_OVERLAY_OCCLUDER_SELECTORS) {
-    const matches = document.querySelectorAll?.(selector)
-      || [document.querySelector?.(selector)].filter(Boolean);
+    const matches =
+      document.querySelectorAll?.(selector) ||
+      [document.querySelector?.(selector)].filter(Boolean);
     for (const element of matches) {
       if (seen.has(element) || !elementIsVisible(element)) continue;
       seen.add(element);
@@ -1295,7 +1550,11 @@ function nodeIsOrContainsOccluderChrome(node) {
   if (!node || typeof node.matches !== 'function') return false; // text/comment nodes
   for (const selector of WORLD_OVERLAY_OCCLUDER_SELECTORS) {
     if (node.matches(selector)) return true;
-    if (typeof node.querySelector === 'function' && node.querySelector(selector)) return true;
+    if (
+      typeof node.querySelector === 'function' &&
+      node.querySelector(selector)
+    )
+      return true;
   }
   return false;
 }
@@ -1331,9 +1590,11 @@ function handleChromeMutations(records) {
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
     if (!record) continue;
-    if (record.type !== 'childList'
-      || childListTouchesChrome(record.addedNodes)
-      || childListTouchesChrome(record.removedNodes)) {
+    if (
+      record.type !== 'childList' ||
+      childListTouchesChrome(record.addedNodes) ||
+      childListTouchesChrome(record.removedNodes)
+    ) {
       markOccludersDirty();
       return;
     }
@@ -1347,7 +1608,10 @@ function installUiOccluderObservers() {
     _mutationObserver = new MutationObserver(handleChromeMutations);
     // Body observation is childList discovery only, filtered in the callback;
     // attribute churn is observed per occluder element, without subtree.
-    _mutationObserver.observe(document.body, { subtree: true, childList: true });
+    _mutationObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+    });
   }
   if (typeof ResizeObserver === 'function') {
     _resizeObserver = new ResizeObserver(markLayoutDirty);
@@ -1412,10 +1676,30 @@ function activeFadeCount(timestamp) {
     for (let i = 0; i < stateCount; i++) {
       const state = arbiter.activeStateAt(i);
       if (state.selected) {
-        if (timestamp - state.enterStartedAt < LABEL_ARBITER_TIMING.fadeInMs) count++;
-      } else if (timestamp - state.exitStartedAt < LABEL_ARBITER_TIMING.fadeOutMs) {
+        if (timestamp - state.enterStartedAt < LABEL_ARBITER_TIMING.fadeInMs)
+          count++;
+      } else if (
+        timestamp - state.exitStartedAt <
+        LABEL_ARBITER_TIMING.fadeOutMs
+      ) {
         count++;
       }
+    }
+  }
+  return count;
+}
+
+function activeLeaderAnimationCount(timestamp) {
+  let count = 0;
+  for (let i = 0; i < _sourceList.length; i++) {
+    const source = _sourceList[i];
+    if (!sourceActive(source)) continue;
+    for (const entry of source.entries.values()) {
+      if (
+        entry.leaderAnimationMs > 0 &&
+        timestamp - entry.leaderAnimationStartedAt < entry.leaderAnimationMs
+      )
+        count++;
     }
   }
   return count;
@@ -1431,13 +1715,23 @@ function overlayHasPaintWork(timestamp = nowMs()) {
   return false;
 }
 
+/** `out = a × b`, 4 × 4 column-major. */
+function multiplyMatrices(a, b, out) {
+  for (let column = 0; column < 4; column++) {
+    const b0 = b[column * 4];
+    const b1 = b[column * 4 + 1];
+    const b2 = b[column * 4 + 2];
+    const b3 = b[column * 4 + 3];
+    for (let row = 0; row < 4; row++)
+      out[column * 4 + row] =
+        a[row] * b0 + a[4 + row] * b1 + a[8 + row] * b2 + a[12 + row] * b3;
+  }
+  return out;
+}
+
 function prepareProjectionMatrix() {
-  const camera = _viewer.camera;
-  const matrix = Cesium.Matrix4.multiply(
-    camera.frustum.projectionMatrix,
-    camera.viewMatrix,
-    _scratchViewProjection,
-  );
+  const { view, projection } = _camera.matrices();
+  const matrix = multiplyMatrices(projection, view, _scratchViewProjection);
   _viewProjectionScalars.m0 = matrix[0];
   _viewProjectionScalars.m1 = matrix[1];
   _viewProjectionScalars.m3 = matrix[3];
@@ -1455,13 +1749,11 @@ function prepareProjectionMatrix() {
 
 function prepareCustomPaintFrame(timestamp, keyhole) {
   const viewProjection = prepareProjectionMatrix();
-  const camera = _viewer.camera.positionWC;
-  if (camera.x !== _occluderCameraX || camera.y !== _occluderCameraY || camera.z !== _occluderCameraZ) {
-    _occluder.cameraPosition = camera;
-    _occluderCameraX = camera.x;
-    _occluderCameraY = camera.y;
-    _occluderCameraZ = camera.z;
-  }
+  const pose = _camera.pose();
+  _eye.x = pose.position.x;
+  _eye.y = pose.position.y;
+  _eye.z = pose.position.z;
+  _eyeHeight = pose.height;
   _customPaintFrame.canvas = _canvas;
   _customPaintFrame.surface = _canvas;
   _customPaintFrame.ctx = _ctx;
@@ -1469,7 +1761,8 @@ function prepareCustomPaintFrame(timestamp, keyhole) {
   _customPaintFrame.height = _canvasHeight;
   _customPaintFrame.dpr = _canvasDpr;
   _customPaintFrame.timestamp = timestamp;
-  _customPaintFrame.cameraPosition = camera;
+  _customPaintFrame.cameraPosition = _eye;
+  _customPaintFrame.cameraHeight = _eyeHeight;
   _customPaintFrame.occluder = _occluder;
   _customPaintFrame.keyhole = keyhole;
   _customPaintFrame.uiRectCount = _uiOcclusionRects.length;
@@ -1483,13 +1776,15 @@ function getProjectionRecord(entry) {
     record = {
       key: entry._overlayKey,
       entry,
-      position: new Cesium.Cartesian3(),
+      position: new Position(),
       screen: { x: 0, y: 0 },
       layout: entry._overlayLayout,
       placements: [],
       candidate: null,
       distanceAlpha: 1,
       paintScale: 1,
+      leaderProgress: 1,
+      contentAlpha: 1,
       altitudeAlpha: 1,
       sourceAlpha: 1,
       protectedPlacement: null,
@@ -1552,15 +1847,62 @@ function resetFrameDomains() {
   }
 }
 
+// Evaluate optional scene presentation outside the shared projection hot path.
+// Passing records (rather than intermediate doubles) also avoids boxing the
+// ordinary moving-source workload at a non-inlined call boundary.
+function applyPresentation(entry, source, record) {
+  try {
+    const scale = Number(
+      typeof entry.presentationScale === 'function'
+        ? entry.presentationScale()
+        : entry.presentationScale,
+    );
+    record.paintScale *= Number.isFinite(scale) ? Math.max(0, scale) : 1;
+    const alpha = Number(
+      typeof entry.sourceAlpha === 'function'
+        ? entry.sourceAlpha()
+        : entry.sourceAlpha,
+    );
+    record.sourceAlpha =
+      source.options.alpha *
+      (Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1);
+    const leader = Number(
+      typeof entry.leaderProgress === 'function'
+        ? entry.leaderProgress()
+        : entry.leaderProgress,
+    );
+    record.leaderProgress = Number.isFinite(leader)
+      ? Math.max(0, Math.min(1, leader))
+      : 1;
+    const content = Number(
+      typeof entry.contentAlpha === 'function'
+        ? entry.contentAlpha()
+        : entry.contentAlpha,
+    );
+    record.contentAlpha = Number.isFinite(content)
+      ? Math.max(0, Math.min(1, content))
+      : 1;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function snapshotAndProject(entry, source, viewProjection, keyhole) {
   const record = getProjectionRecord(entry);
   let position;
   try {
-    position = typeof entry.position === 'function' ? entry.position() : entry.position;
+    position =
+      typeof entry.position === 'function' ? entry.position() : entry.position;
   } catch {
     return null;
   }
-  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) {
+  if (
+    !position ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y) ||
+    !Number.isFinite(position.z)
+  ) {
     return null;
   }
   record.position.x = position.x;
@@ -1568,40 +1910,89 @@ function snapshotAndProject(entry, source, viewProjection, keyhole) {
   record.position.z = position.z;
 
   const { x: px, y: py, z: pz } = record.position;
-  const clipW = viewProjection.m3 * px + viewProjection.m7 * py
-    + viewProjection.m11 * pz + viewProjection.m15;
+  const clipW =
+    viewProjection.m3 * px +
+    viewProjection.m7 * py +
+    viewProjection.m11 * pz +
+    viewProjection.m15;
   if (!(clipW > 0)) return null;
   const invW = 1 / clipW;
-  record.screen.x = ((viewProjection.m0 * px + viewProjection.m4 * py
-    + viewProjection.m8 * pz + viewProjection.m12) * invW * 0.5 + 0.5) * _canvasWidth;
-  record.screen.y = (0.5 - (viewProjection.m1 * px + viewProjection.m5 * py
-    + viewProjection.m9 * pz + viewProjection.m13) * invW * 0.5) * _canvasHeight;
-  if (entry.safeTopRatio > 0 && !(entry.pinned && entry.pinnedBypassesSafeTop)) {
-    const safeTop = Math.min(entry.safeTopMaxPx, _canvasHeight * entry.safeTopRatio);
+  record.screen.x =
+    ((viewProjection.m0 * px +
+      viewProjection.m4 * py +
+      viewProjection.m8 * pz +
+      viewProjection.m12) *
+      invW *
+      0.5 +
+      0.5) *
+    _canvasWidth;
+  record.screen.y =
+    (0.5 -
+      (viewProjection.m1 * px +
+        viewProjection.m5 * py +
+        viewProjection.m9 * pz +
+        viewProjection.m13) *
+        invW *
+        0.5) *
+    _canvasHeight;
+  if (
+    entry.safeTopRatio > 0 &&
+    !(entry.pinned && entry.pinnedBypassesSafeTop)
+  ) {
+    const safeTop = Math.min(
+      entry.safeTopMaxPx,
+      _canvasHeight * entry.safeTopRatio,
+    );
     if (record.screen.y < safeTop) return null;
   }
-  if (!isOverlayPointVisible(
-    entry,
-    record.position,
-    record.screen,
-    _viewport,
-    _occluder,
-  )) return null;
+  if (
+    !isOverlayPointVisible(
+      entry,
+      record.position,
+      record.screen,
+      _viewport,
+      _occluder,
+    )
+  )
+    return null;
 
   // Doubles crossing a non-inlined call boundary are boxed, so the two hot
   // scalar steps stay local: the range is computed inline, and the common
   // "no far limit" fade policy resolves without calling out at all. Both are
   // exact restatements of `Cartesian3.distance` / `distanceFade`.
-  const cameraPosition = _viewer.camera.positionWC;
+  const cameraPosition = _eye;
   const rangeX = cameraPosition.x - record.position.x;
   const rangeY = cameraPosition.y - record.position.y;
   const rangeZ = cameraPosition.z - record.position.z;
-  const distance = Math.sqrt(rangeX * rangeX + rangeY * rangeY + rangeZ * rangeZ);
-  record.distanceAlpha = entry.maxDistance === Number.POSITIVE_INFINITY
-    ? (distance >= entry.minDistance ? 1 : 0)
-    : distanceFade(distance, record.distanceOptions);
-  const cameraAltitude = _viewer.camera.positionCartographic?.height;
-  record.paintScale = entry.distanceScale ? distanceScale(distance, entry.distanceScale) : 1;
+  const distance = Math.sqrt(
+    rangeX * rangeX + rangeY * rangeY + rangeZ * rangeZ,
+  );
+  record.distanceAlpha =
+    entry.maxDistance === Number.POSITIVE_INFINITY
+      ? distance >= entry.minDistance
+        ? 1
+        : 0
+      : distanceFade(distance, record.distanceOptions);
+  const cameraAltitude = _eyeHeight;
+  // The distance curve is local for the same reason as the altitude curve
+  // below: through a helper the engine may not inline, its result is boxed.
+  // `entry.distanceScale` was normalized when the entry was registered.
+  const scaleCurve = entry.distanceScale;
+  if (!scaleCurve || !Number.isFinite(distance)) {
+    record.paintScale = 1;
+  } else if (
+    distance <= scaleCurve.near ||
+    scaleCurve.far === scaleCurve.near
+  ) {
+    record.paintScale = scaleCurve.nearValue;
+  } else if (distance >= scaleCurve.far) {
+    record.paintScale = scaleCurve.farValue;
+  } else {
+    record.paintScale =
+      scaleCurve.nearValue +
+      (scaleCurve.farValue - scaleCurve.nearValue) *
+        ((distance - scaleCurve.near) / (scaleCurve.far - scaleCurve.near));
+  }
   // Keep the source-configurable piecewise curve local to the projection hot
   // path. Passing its five doubles through a non-inlined helper boxed them for
   // every thumbnail candidate and broke the shared 154 B/candidate gate.
@@ -1611,26 +2002,51 @@ function snapshotAndProject(entry, source, viewProjection, keyhole) {
     if (cameraAltitude > altitudeCurve.fullEnd) {
       if (cameraAltitude <= altitudeCurve.midEnd) {
         const span = Math.max(1, altitudeCurve.midEnd - altitudeCurve.fullEnd);
-        let progress = Math.max(0, Math.min(1, (cameraAltitude - altitudeCurve.fullEnd) / span));
-        if (altitudeCurve.smoothToMid) progress = progress * progress * (3 - 2 * progress);
+        let progress = Math.max(
+          0,
+          Math.min(1, (cameraAltitude - altitudeCurve.fullEnd) / span),
+        );
+        if (altitudeCurve.smoothToMid)
+          progress = progress * progress * (3 - 2 * progress);
         altitudeFactor = 1 + (altitudeCurve.midValue - 1) * progress;
       } else if (cameraAltitude >= altitudeCurve.end) {
         altitudeFactor = altitudeCurve.endValue;
       } else {
-        const progress = (cameraAltitude - altitudeCurve.midEnd)
-          / Math.max(1, altitudeCurve.end - altitudeCurve.midEnd);
-        altitudeFactor = altitudeCurve.midValue
-          + (altitudeCurve.endValue - altitudeCurve.midValue) * progress;
+        const progress =
+          (cameraAltitude - altitudeCurve.midEnd) /
+          Math.max(1, altitudeCurve.end - altitudeCurve.midEnd);
+        altitudeFactor =
+          altitudeCurve.midValue +
+          (altitudeCurve.endValue - altitudeCurve.midValue) * progress;
       }
     }
     record.paintScale *= altitudeFactor;
   }
-  record.altitudeAlpha = entry.altitudeFadeEnd === Number.POSITIVE_INFINITY
-    ? (Number.isFinite(cameraAltitude) && cameraAltitude < entry.minAltitude ? 0 : 1)
-    : altitudeFade(cameraAltitude, record.altitudeOptions);
-  record.sourceAlpha = source.options.alpha * entry.sourceAlpha;
-  if (record.distanceAlpha <= 0 || record.paintScale <= 0
-    || record.altitudeAlpha <= 0 || record.sourceAlpha <= 0) return null;
+  record.altitudeAlpha =
+    entry.altitudeFadeEnd === Number.POSITIVE_INFINITY
+      ? Number.isFinite(cameraAltitude) && cameraAltitude < entry.minAltitude
+        ? 0
+        : 1
+      : altitudeFade(cameraAltitude, record.altitudeOptions);
+  record.leaderProgress = 1;
+  record.contentAlpha = 1;
+  if (
+    entry.presentationScale !== 1 ||
+    entry.leaderProgress !== 1 ||
+    entry.contentAlpha !== 1 ||
+    typeof entry.sourceAlpha === 'function'
+  ) {
+    if (!applyPresentation(entry, source, record)) return null;
+  } else {
+    record.sourceAlpha = source.options.alpha * entry.sourceAlpha;
+  }
+  if (
+    record.distanceAlpha <= 0 ||
+    record.paintScale <= 0 ||
+    record.altitudeAlpha <= 0 ||
+    record.sourceAlpha <= 0
+  )
+    return null;
 
   measureOverlayEntry(_ctx, entry, record.layout);
   record.placementInput.anchorX = record.screen.x;
@@ -1644,10 +2060,9 @@ function snapshotAndProject(entry, source, viewProjection, keyhole) {
       ? distanceScale(distance, entry.anchorRadiusScale)
       : 1;
     const anchorRadius = entry.anchorRadiusPx * anchorScale;
-    record.placementInput.gap = anchorRadius + Math.max(
-      entry.minAnchorGapPx,
-      anchorRadius + entry.anchorGapPaddingPx,
-    );
+    record.placementInput.gap =
+      anchorRadius +
+      Math.max(entry.minAnchorGapPx, anchorRadius + entry.anchorGapPaddingPx);
     record.placementInput.leaderOffset = anchorRadius;
   } else {
     record.placementInput.gap = entry.gapPx;
@@ -1680,7 +2095,8 @@ function snapshotAndProject(entry, source, viewProjection, keyhole) {
     let hardClear = 0;
     for (let i = 0; i < record.placements.length; i++) {
       const placement = record.placements[i];
-      if (overlayRectIntersectsAnyHard(placement.rect, _uiOcclusionRects)) continue;
+      if (overlayRectIntersectsAnyHard(placement.rect, _uiOcclusionRects))
+        continue;
       record.placements[hardClear++] = placement;
     }
     record.placements.length = hardClear;
@@ -1707,17 +2123,19 @@ function snapshotAndProject(entry, source, viewProjection, keyhole) {
   // Shared keyhole alpha is radial and monotonic, so the closest surviving
   // placement is exactly the maximum-alpha placement. Evaluate the shared
   // helper once, then evaluate the final chosen rectangle again at paint.
-  record.candidate.keyholeAlpha = entry.edgeFade === 'keyhole'
-    ? (centerDistance <= keyhole.radius
-      ? 1
-      : keyholeLabelAlphaFromGeometry(closestCenterX, closestCenterY, keyhole))
-    : 1;
+  record.candidate.keyholeAlpha =
+    entry.edgeFade === 'keyhole'
+      ? centerDistance <= keyhole.radius
+        ? 1
+        : keyholeLabelAlphaFromGeometry(closestCenterX, closestCenterY, keyhole)
+      : 1;
   record.candidate.centerDistance = centerDistance;
   // Anchor separation is authored in unscaled CSS px; the shipped pass scaled it
   // with the card, so a zoomed-out (smaller) card needs proportionally less room.
-  record.candidate.minAnchorSeparationPx = entry.minAnchorSeparationPx > 0
-    ? entry.minAnchorSeparationPx * record.paintScale
-    : 0;
+  record.candidate.minAnchorSeparationPx =
+    entry.minAnchorSeparationPx > 0
+      ? entry.minAnchorSeparationPx * record.paintScale
+      : 0;
   record.candidate.screenX = record.screen.x;
   record.candidate.screenY = record.screen.y;
   return record;
@@ -1740,15 +2158,23 @@ function collectFrameCandidates(keyhole, viewProjection) {
       const domainId = source.cohortDomainIds[c];
       const cohort = source.cohortLists[c];
       const domain = getOrCreateDomain(domainId);
-      domain.capacity = domainId === 'ambient-card'
-        ? Math.min(
-          AMBIENT_CARD_COLLISION_CAPACITY,
-          domain.capacity + source.options.collisionCapacity,
-        )
-        : Math.max(domain.capacity, source.options.collisionCapacity);
+      domain.capacity =
+        domainId === 'ambient-card'
+          ? Math.min(
+              AMBIENT_CARD_COLLISION_CAPACITY,
+              domain.capacity + source.options.collisionCapacity,
+            )
+          : Math.max(domain.capacity, source.options.collisionCapacity);
       domain.moving ||= source.options.moving;
-      domain.solveIntervalMs = Math.min(domain.solveIntervalMs, source.options.solveIntervalMs);
-      domain.demandBySource.set(source.id, source.demandByDomain.get(domainId) || 0);
+      domain.solveIntervalMs = Math.min(
+        domain.solveIntervalMs,
+        source.options.solveIntervalMs,
+      );
+      domain.demandBySource.set(
+        source.id,
+        source.demandByDomain.get(domainId) || 0,
+      );
+      domain.limitsBySource.set(source.id, source.options.maxVisible);
       candidateCount += cohort.length;
       for (let i = 0; i < cohort.length; i++) {
         const entry = cohort[i];
@@ -1757,9 +2183,19 @@ function collectFrameCandidates(keyhole, viewProjection) {
         // the shipped pinned-card exception remains immediate feedback.
         if (entry.requireImage && !entry.pinned) {
           const imageSlot = entry._overlayImageSlot;
-          if (imageSlot ? (!(imageSlot.stamp > 0) || !imageSlot.frame) : !entry.image) continue;
+          if (
+            imageSlot
+              ? !(imageSlot.stamp > 0) || !imageSlot.frame
+              : !entry.image
+          )
+            continue;
         }
-        const record = snapshotAndProject(entry, source, viewProjection, keyhole);
+        const record = snapshotAndProject(
+          entry,
+          source,
+          viewProjection,
+          keyhole,
+        );
         if (!record) continue;
         // Anchor separation runs HERE, not inside the arbiter. The shipped pass
         // filtered the candidate list and then drew it; rejecting inside the
@@ -1775,8 +2211,12 @@ function collectFrameCandidates(keyhole, viewProjection) {
             if (domain.sepSource[k] !== source.id) continue;
             const dx = record.candidate.screenX - domain.sepX[k];
             const dy = record.candidate.screenY - domain.sepY[k];
-            const required = separation > domain.sepR[k] ? separation : domain.sepR[k];
-            if (dx * dx + dy * dy < required * required) { clear = false; break; }
+            const required =
+              separation > domain.sepR[k] ? separation : domain.sepR[k];
+            if (dx * dx + dy * dy < required * required) {
+              clear = false;
+              break;
+            }
           }
           if (!clear) continue;
           const slot = domain.sepCount++;
@@ -1787,7 +2227,8 @@ function collectFrameCandidates(keyhole, viewProjection) {
         }
         projectedCount++;
         if (isProtected(record.entry)) {
-          domain.protectedCandidates[domain.protectedCount++] = record.candidate;
+          domain.protectedCandidates[domain.protectedCount++] =
+            record.candidate;
         } else {
           record.candidate.frameStamp = _frameStamp;
           domain.candidates[domain.candidateCount++] = record.candidate;
@@ -1799,17 +2240,24 @@ function collectFrameCandidates(keyhole, viewProjection) {
 
   for (let d = 0; d < _domainList.length; d++) {
     const domain = _domainList[d];
-    sortPooledRange(domain.protectedCandidates, domain.protectedCount, compareProtectedCandidates);
+    sortPooledRange(
+      domain.protectedCandidates,
+      domain.protectedCount,
+      compareProtectedCandidates,
+    );
     for (let p = 0; p < domain.protectedCount; p++) {
       const candidate = domain.protectedCandidates[p];
       let placement = null;
       for (let i = 0; i < candidate.placements.length; i++) {
         const candidatePlacement = candidate.placements[i];
-        if (overlayRectIntersectsAny(
-          candidatePlacement.rect,
-          domain.protectedRects,
-          domain.protectedRectCount,
-        )) continue;
+        if (
+          overlayRectIntersectsAny(
+            candidatePlacement.rect,
+            domain.protectedRects,
+            domain.protectedRectCount,
+          )
+        )
+          continue;
         placement = candidatePlacement;
         break;
       }
@@ -1819,18 +2267,22 @@ function collectFrameCandidates(keyhole, viewProjection) {
         domain.protectedRectCount,
       );
       candidate._record.protectedPlacement = placement;
-      if (placement) domain.protectedRects[domain.protectedRectCount++] = placement.rect;
+      if (placement)
+        domain.protectedRects[domain.protectedRectCount++] = placement.rect;
     }
     for (let a = 0; a < domain.candidateCount; a++) {
       const candidate = domain.candidates[a];
       let count = 0;
       for (let i = 0; i < candidate.placements.length; i++) {
         const placement = candidate.placements[i];
-        if (overlayRectIntersectsAny(
-          placement.rect,
-          domain.protectedRects,
-          domain.protectedRectCount,
-        )) continue;
+        if (
+          overlayRectIntersectsAny(
+            placement.rect,
+            domain.protectedRects,
+            domain.protectedRectCount,
+          )
+        )
+          continue;
         candidate.placements[count++] = placement;
       }
       candidate.placements.length = count;
@@ -1845,10 +2297,12 @@ function collectFrameCandidates(keyhole, viewProjection) {
     domain.candidates.length = count;
     domain.protectedCandidates.length = domain.protectedCount;
     domain.protectedRects.length = domain.protectedRectCount;
-    if (!Number.isFinite(domain.solveIntervalMs)) domain.solveIntervalMs = DEFAULT_MOVING_SOLVE_MS;
+    if (!Number.isFinite(domain.solveIntervalMs))
+      domain.solveIntervalMs = DEFAULT_MOVING_SOLVE_MS;
   }
   let candidateIndexSize = 0;
-  for (let d = 0; d < _domainList.length; d++) candidateIndexSize += _domainList[d].candidateMap.size;
+  for (let d = 0; d < _domainList.length; d++)
+    candidateIndexSize += _domainList[d].candidateMap.size;
   _diagnostics.candidateIndexSize = candidateIndexSize;
   _diagnostics.candidateCount = candidateCount;
   _diagnostics.projectedCount = projectedCount;
@@ -1856,7 +2310,8 @@ function collectFrameCandidates(keyhole, viewProjection) {
 
 function addPaintItem(record, placement, temporalAlpha, selected) {
   if (!record || !placement) return;
-  const item = _paintItemPool[_paintCount] || (_paintItemPool[_paintCount] = {});
+  const item =
+    _paintItemPool[_paintCount] || (_paintItemPool[_paintCount] = {});
   item.record = record;
   item.placement = placement;
   item.temporalAlpha = temporalAlpha;
@@ -1864,7 +2319,35 @@ function addPaintItem(record, placement, temporalAlpha, selected) {
   item.lane = paintLaneForOverlayEntry(record.entry);
   item.zIndex = record.entry.zIndex;
   item.key = record.key;
+  item.collisionHidden = false;
+  item.stamp = _frameStamp;
   _paintQueue[_paintCount++] = item;
+  // Keyed by source and id, not `record.key`, so a lookup builds no string.
+  // Also holds cards fading out after they left `_records`.
+  let bySource = _queuedItemBySource.get(record.entry.source);
+  if (!bySource) {
+    bySource = new Map();
+    _queuedItemBySource.set(record.entry.source, bySource);
+  }
+  bySource.set(record.entry.id, item);
+}
+
+/** Drop index rows for entries that stopped painting (bounded, not per frame). */
+function pruneQueuedItemIndex() {
+  for (const [sourceId, bySource] of _queuedItemBySource) {
+    for (const [entryId, item] of bySource) {
+      // A pooled item that now paints another entry keeps a fresh stamp.
+      const entry = item.record.entry;
+      if (
+        item.stamp !== _frameStamp ||
+        entry.id !== entryId ||
+        entry.source !== sourceId
+      ) {
+        bySource.delete(entryId);
+      }
+    }
+    if (bySource.size === 0) _queuedItemBySource.delete(sourceId);
+  }
 }
 
 function sourceCanPaint(sourceId) {
@@ -1880,13 +2363,14 @@ function solveDomains(timestamp) {
   let solveRevision = 0;
   for (let d = 0; d < _domainList.length; d++) {
     const domain = _domainList[d];
-    const movingSolveDue = domain.moving
-      && timestamp - domain.lastSolveAt >= domain.solveIntervalMs;
+    const movingSolveDue =
+      domain.moving && timestamp - domain.lastSolveAt >= domain.solveIntervalMs;
     if (_solveDirty || movingSolveDue) {
       const started = nowMs();
       domain.arbiter.solve(domain.candidates, {
         capacity: Math.min(domain.capacity, domain.candidates.length),
         demandByLayer: domain.demandBySource,
+        limitsByLayer: domain.limitsBySource,
         now: timestamp,
         // The host publishes its own pooled counters below, so duplicating a
         // per-layer diagnostic object in the arbiter adds no observable data.
@@ -1897,20 +2381,27 @@ function solveDomains(timestamp) {
     }
     for (let p = 0; p < domain.protectedCount; p++) {
       const record = domain.protectedCandidates[p]._record;
-      addPaintItem(record, record.protectedPlacement, record.entry.temporalAlpha, true);
+      addPaintItem(
+        record,
+        record.protectedPlacement,
+        record.entry.temporalAlpha,
+        true,
+      );
       selectedCount++;
     }
     const rendered = domain.arbiter.renderEntries(
       domain.candidateMap,
       timestamp,
       domain.renderEntries,
+      domain.limitsBySource,
     );
     for (let r = 0; r < rendered.length; r++) {
       const renderedEntry = rendered[r];
       const candidate = renderedEntry.candidate;
       const record = candidate?._record;
       if (!record || !sourceCanPaint(record.entry.source)) continue;
-      if (renderedEntry.selected && candidate.frameStamp !== _frameStamp) continue;
+      if (renderedEntry.selected && candidate.frameStamp !== _frameStamp)
+        continue;
       // No second UI veto here. The placement already went through the
       // exclusion preference at projection; re-testing it meant that a panel
       // expanding over a settled card evicted the card outright — it popped
@@ -1928,6 +2419,7 @@ function solveDomains(timestamp) {
     solveRevision += domain.arbiter.solveRevision;
   }
   _paintQueue.length = _paintCount;
+  if (_frameStamp % QUEUED_ITEM_PRUNE_FRAMES === 0) pruneQueuedItemIndex();
   _solveDirty = false;
   _diagnostics.solveMs = solveMs;
   _diagnostics.selectedCount = selectedCount;
@@ -1937,8 +2429,11 @@ function solveDomains(timestamp) {
 
 function publishPaintRect(item) {
   const { record, placement } = item;
-  const rect = _paintRectPool[_paintRectCount] || (_paintRectPool[_paintRectCount] = {});
+  const rect =
+    _paintRectPool[_paintRectCount] || (_paintRectPool[_paintRectCount] = {});
   _paintRectCount++;
+  rect.anchorX = placement.anchorX;
+  rect.anchorY = placement.anchorY;
   rect.x = placement.rect.x;
   rect.y = placement.rect.y;
   rect.w = placement.rect.w;
@@ -1952,15 +2447,53 @@ function publishPaintRect(item) {
   if (record.entry.interactive) _hitRects[_hitRectCount++] = rect;
 }
 
+/** Publish the action list to every subscriber. */
+function presentActions(next) {
+  _actions = next && Object.freeze(next);
+  for (const listener of _actionsListeners) listener(_actions);
+}
+
+/**
+ * Receive the visible map target list now and after every change.
+ * @param {(view: ?object) => void} listener
+ * @returns {() => void} Unsubscribe.
+ */
+export function subscribeWorldOverlayActions(listener) {
+  _actionsListeners.add(listener);
+  listener(_actions);
+  return () => _actionsListeners.delete(listener);
+}
+
+/**
+ * Focus a listed target, as its button does, announcing an accepted focus.
+ * @param {object} owner The `owner` of the list the button belongs to.
+ * @param {string} key The item's key.
+ */
+export function activateWorldOverlayAction(owner, key) {
+  if (!_actions || owner !== _actions.owner) return;
+  const item = _actions.items.find((candidate) => candidate.key === key);
+  const activate = _accessibleActivatorByKey.get(key);
+  if (!item || !activate) return;
+  const accepted = activate();
+  if (accepted !== false && _actions?.owner === owner) {
+    presentActions({
+      ..._actions,
+      status: t('Focusing {label}', { label: item.label }),
+      announced: _actions.announced + 1,
+    });
+  }
+}
+
 /** Keep a stable, bounded accessible mirror of currently painted actions. */
 function syncAccessibleActions() {
-  if (!_accessibilityList) return;
+  if (!_actions) return;
   _accessibleActivatorByKey.clear();
   const items = [];
   for (let i = _hitRectCount - 1; i >= 0; i--) {
     const rect = _hitRects[i];
     const entry = rect.entry;
-    if (!entry?.accessibilityLabel || typeof entry.activate !== 'function') continue;
+    if (!entry?.accessibilityLabel || typeof entry.activate !== 'function')
+      continue;
     if (_accessibleActivatorByKey.has(rect.key)) continue;
     _accessibleActivatorByKey.set(rect.key, entry.activate);
     items.push({
@@ -1970,32 +2503,14 @@ function syncAccessibleActions() {
     });
   }
   const signature = items
-    .map((item) => `${item.key}\u0000${item.label}\u0000${item.selected ? '1' : '0'}`)
+    .map(
+      (item) =>
+        `${item.key}\u0000${item.label}\u0000${item.selected ? '1' : '0'}`,
+    )
     .join('\u0001');
   if (signature === _accessibilitySignature) return;
   _accessibilitySignature = signature;
-  if (typeof _accessibilityList.replaceChildren === 'function') {
-    _accessibilityList.replaceChildren();
-  } else {
-    while (_accessibilityList.firstChild) _accessibilityList.removeChild(_accessibilityList.firstChild);
-  }
-  for (const item of items) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = item.label;
-    button.setAttribute('aria-label', item.label);
-    button.setAttribute('aria-pressed', String(item.selected));
-    button.dataset.overlayActionKey = item.key;
-    button.addEventListener?.('click', () => {
-      const activate = _accessibleActivatorByKey.get(item.key);
-      if (!activate) return;
-      const accepted = activate();
-      if (accepted !== false && _accessibilityStatus) {
-        _accessibilityStatus.textContent = `Focusing ${item.label}`;
-      }
-    });
-    _accessibilityList.appendChild(button);
-  }
+  presentActions({ ..._actions, items });
 }
 
 let _detectionSurfacePrepared = false;
@@ -2010,7 +2525,8 @@ function paintCustomLane(lane) {
     if (!surface || !ctx) continue;
     _customPaintFrame.surface = surface;
     _customPaintFrame.ctx = ctx;
-    if (record.shouldPaint && record.shouldPaint(_customPaintFrame) === false) continue;
+    if (record.shouldPaint && record.shouldPaint(_customPaintFrame) === false)
+      continue;
     if (detectionTarget && !_detectionSurfacePrepared) {
       clearCanvas(false, true);
       _detectionSurfacePrepared = true;
@@ -2032,25 +2548,46 @@ function paintCustomLane(lane) {
   }
 }
 
-function paintEntryItem(item, keyhole) {
+/** Keyhole edge fade of one placed entry (1 for entries that do not fade). */
+function entryKeyholeAlpha(entry, placement, keyhole) {
+  if (entry.edgeFade !== 'keyhole') return 1;
+  const keyholeX = placement.centerX - keyhole.centerX;
+  const keyholeY = placement.centerY - keyhole.centerY;
+  return keyholeX * keyholeX + keyholeY * keyholeY <=
+    keyhole.radius * keyhole.radius
+    ? 1
+    : keyholeLabelAlphaFromGeometry(
+        placement.centerX,
+        placement.centerY,
+        keyhole,
+      );
+}
+
+function paintEntryItem(item, keyhole, sonar) {
+  if (item.collisionHidden) return;
   const { record, placement } = item;
   const entry = record.entry;
-  let keyholeAlpha = 1;
-  if (entry.edgeFade === 'keyhole') {
-    const keyholeX = placement.centerX - keyhole.centerX;
-    const keyholeY = placement.centerY - keyhole.centerY;
-    keyholeAlpha = keyholeX * keyholeX + keyholeY * keyholeY <= keyhole.radius * keyhole.radius
-      ? 1
-      : keyholeLabelAlphaFromGeometry(placement.centerX, placement.centerY, keyhole);
-  }
+  const keyholeAlpha = entryKeyholeAlpha(entry, placement, keyhole);
   // All five channels are normalized at their source. Keep the multiply on
   // the hot paint path so its intermediate doubles remain unboxed; the pure
   // `combinedOverlayAlpha` export still specifies/tests the same binding.
-  const finalAlpha = record.sourceAlpha * item.temporalAlpha
-    * record.distanceAlpha * record.altitudeAlpha * keyholeAlpha;
+  const finalAlpha =
+    record.sourceAlpha *
+    item.temporalAlpha *
+    record.distanceAlpha *
+    record.altitudeAlpha *
+    keyholeAlpha *
+    (sonar ? sonar.label(sonar.at(placement.anchorX, placement.anchorY)) : 1);
   if (finalAlpha <= 0.001) return;
   if (record.paintScale === 1) {
-    paintOverlayEntry(_ctx, entry, placement, finalAlpha);
+    paintOverlayEntry(
+      _ctx,
+      entry,
+      placement,
+      finalAlpha,
+      record.leaderProgress,
+      record.contentAlpha,
+    );
   } else {
     const scaled = localizeScaledPlacement(
       placement,
@@ -2060,7 +2597,14 @@ function paintEntryItem(item, keyhole) {
     _ctx.save();
     _ctx.translate(placement.rect.x, placement.rect.y);
     _ctx.scale(record.paintScale, record.paintScale);
-    paintOverlayEntry(_ctx, entry, scaled, finalAlpha);
+    paintOverlayEntry(
+      _ctx,
+      entry,
+      scaled,
+      finalAlpha,
+      record.leaderProgress,
+      record.contentAlpha,
+    );
     _ctx.restore();
   }
   publishPaintRect(item);
@@ -2071,14 +2615,105 @@ function paintEntryItem(item, keyhole) {
   _paintedBySource[entry.source]++;
 }
 
+function compareYieldingPaintItems(a, b) {
+  const aYields = !!a.record.entry.yieldToCollisionGroup;
+  const bYields = !!b.record.entry.yieldToCollisionGroup;
+  return (
+    Number(aYields) - Number(bYields) ||
+    b.record.entry.priority - a.record.entry.priority ||
+    compareStableKeys(a.key, b.key)
+  );
+}
+
+/** Recheck yielding content every painted frame, even between camera solves.
+ * The arbiter's sticky/exit placements are intentionally retained for cards;
+ * labels can only use the remaining rectangles. All buffers are reused. */
+function declutterYieldingEntries() {
+  let hasYielding = false;
+  for (let i = 0; i < _paintCount; i++)
+    if (_paintQueue[i].record.entry.yieldToCollisionGroup) {
+      hasYielding = true;
+      break;
+    }
+  if (!hasYielding) return;
+  sortPooledRange(_paintQueue, _paintCount, compareYieldingPaintItems);
+  for (let i = 0; i < _paintCount; i++) {
+    const item = _paintQueue[i];
+    const entry = item.record.entry;
+    if (!entry.yieldToCollisionGroup) continue;
+    const placements = item.record.placements;
+    let accepted = null;
+    // Try the arbiter's chosen corner first, then its other valid placements.
+    for (let p = -1; p < placements.length; p++) {
+      const placement = p < 0 ? item.placement : placements[p];
+      if (p >= 0 && placement === item.placement) continue;
+      let blocked = false;
+      for (let j = 0; j < i; j++) {
+        const other = _paintQueue[j];
+        if (other.collisionHidden) continue;
+        const group = other.record.entry.collisionGroup;
+        if (
+          (group === entry.collisionGroup ||
+            group === entry.yieldToCollisionGroup) &&
+          overlayRectsOverlap(placement.rect, other.placement.rect)
+        ) {
+          blocked = true;
+          break;
+        }
+      }
+      if (!blocked) {
+        accepted = placement;
+        break;
+      }
+    }
+    if (accepted) item.placement = accepted;
+    else item.collisionHidden = true;
+  }
+}
+
+function syncPaintVisibility(painted = true) {
+  for (let s = 0; s < _sourceList.length; s++) {
+    const source = _sourceList[s];
+    const callback = source.options.onVisibilityChange;
+    if (!callback) continue;
+    const count = painted ? _paintedBySource[source.id] || 0 : 0;
+    let changed = count !== source.visibleIds.size;
+    if (!changed && painted) {
+      for (const id of source.visibleIds) {
+        if (
+          _paintRectByKey.get(entryKey(source.id, id))?.stamp !== _frameStamp
+        ) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed) continue;
+    source.visibleIds.clear();
+    if (painted)
+      for (let i = 0; i < _paintRectCount; i++) {
+        const rect = _paintRectPool[i];
+        if (rect.sourceId === source.id) source.visibleIds.add(rect.entryId);
+      }
+    callback(source.visibleIds);
+  }
+}
+
 function paintFrame(keyhole) {
   const started = nowMs();
+  const sonar = isCyberSonarActive()
+    ? createCyberSonarSampler(_canvasWidth, _canvasHeight, started)
+    : null;
   clearCanvas(true, false);
   _detectionSurfacePrepared = false;
-  if (activeCustomPaintLaneCount(PAINT_TARGET_DETECTION) === 0
-    && _detectionSurfaceNeedsClear) clearCanvas(false, true);
+  if (
+    activeCustomPaintLaneCount(PAINT_TARGET_DETECTION) === 0 &&
+    _detectionSurfaceNeedsClear
+  )
+    clearCanvas(false, true);
   _paintRectCount = 0;
   _hitRectCount = 0;
+  declutterYieldingEntries();
   sortPooledRange(_paintQueue, _paintCount, comparePaintItems);
   // The shared canvas is not clipped either. Cards already avoid solid chrome
   // by placement, and every occluder composites above this host in the DOM, so
@@ -2090,7 +2725,7 @@ function paintFrame(keyhole) {
     // retains its former z5 position below every ordinary host entry at z6.
     paintCustomLane(lane);
     while (itemIndex < _paintCount && _paintQueue[itemIndex].lane === lane) {
-      paintEntryItem(_paintQueue[itemIndex], keyhole);
+      paintEntryItem(_paintQueue[itemIndex], keyhole, sonar);
       itemIndex++;
     }
   }
@@ -2101,8 +2736,9 @@ function paintFrame(keyhole) {
   _diagnostics.paintRectPoolSize = _paintRectPool.length;
   _diagnostics.paintMs = nowMs() - started;
   syncAccessibleActions();
-  _canvasNeedsClear = _paintRectCount > 0
-    || activeCustomPaintLaneCount(PAINT_TARGET_SHARED) > 0;
+  syncPaintVisibility();
+  _canvasNeedsClear =
+    _paintRectCount > 0 || activeCustomPaintLaneCount(PAINT_TARGET_SHARED) > 0;
 }
 
 function localizeScaledPlacement(placement, scale, out) {
@@ -2143,28 +2779,39 @@ function resetFrameDiagnostics() {
 }
 
 function drawWorldOverlay() {
+  if (_sonarRenderTimer !== null) {
+    clearTimeout(_sonarRenderTimer);
+    _sonarRenderTimer = null;
+  }
   if (_destroyed || !_viewer || !_canvas || !_ctx) return;
   const timestamp = nowMs();
   if (!overlayHasPaintWork(timestamp)) {
     resetFrameDiagnostics();
     _solveDirty = false;
     if (_canvasNeedsClear || _detectionSurfaceNeedsClear) clearCanvas();
-    if (_accessibilitySignature) {
-      _hitRectCount = 0;
-      syncAccessibleActions();
-    }
+    // Nothing is painted now, so nothing can be hit.
+    _hitRectCount = 0;
+    if (_accessibilitySignature) syncAccessibleActions();
+    syncPaintVisibility(false);
     return;
   }
   if (_resizeDirty) ensureCanvasSize();
   if (_canvasWidth <= 0 || _canvasHeight <= 0) return;
   _frameStamp++;
-  refreshUiOccluders(timestamp, _occludersUpdatedAt === Number.NEGATIVE_INFINITY);
+  refreshUiOccluders(
+    timestamp,
+    _occludersUpdatedAt === Number.NEGATIVE_INFINITY,
+  );
   resetFrameDiagnostics();
   const projectionStarted = nowMs();
   const fadeTuning = getKeyholeFadeTuning();
-  if (!_keyhole || _keyholeWidth !== _canvasWidth || _keyholeHeight !== _canvasHeight
-    || _keyholeFadeRatio !== fadeTuning.fadeRatio
-    || _keyholeOutsideOpacity !== fadeTuning.outsideOpacity) {
+  if (
+    !_keyhole ||
+    _keyholeWidth !== _canvasWidth ||
+    _keyholeHeight !== _canvasHeight ||
+    _keyholeFadeRatio !== fadeTuning.fadeRatio ||
+    _keyholeOutsideOpacity !== fadeTuning.outsideOpacity
+  ) {
     _keyhole = getKeyholeGeometry(_canvasWidth, _canvasHeight);
     _keyholeWidth = _canvasWidth;
     _keyholeHeight = _canvasHeight;
@@ -2177,8 +2824,17 @@ function drawWorldOverlay() {
   _diagnostics.projectionMs = nowMs() - projectionStarted;
   solveDomains(timestamp);
   paintFrame(keyhole);
-  const fadesRemaining = activeFadeCount(timestamp);
-  if (fadesRemaining > 0) _viewer.scene.requestRender?.();
+  // Labels-only layers need a bounded sweep refresh even with detection off.
+  // Empty/hidden hosts and teardown never retain scanner render demand.
+  if (_paintRectCount > 0 && isCyberSonarActive()) {
+    _sonarRenderTimer = setTimeout(() => {
+      _sonarRenderTimer = null;
+      if (!_destroyed && isCyberSonarActive()) requestOverlayRender();
+    }, CYBER_SONAR_RENDER_INTERVAL_MS);
+  }
+  const animationsRemaining =
+    activeFadeCount(timestamp) + activeLeaderAnimationCount(timestamp);
+  if (animationsRemaining > 0) requestOverlayRender();
 }
 
 function createDevFacade() {
@@ -2188,31 +2844,38 @@ function createDevFacade() {
 
 /**
  * Initialize the singleton host. Repeated calls for the same viewer are no-op.
- * @param {Cesium.Viewer} viewer
+ * @param {object} viewer The scene object a renderer draws (its `container`
+ *   and `canvas` place the overlay); the renderer's camera, frame and query
+ *   ports project, cull and drive it.
  */
 export function initWorldOverlay(viewer) {
-  if (!viewer?.scene?.postRender?.addEventListener) {
-    throw new TypeError('initWorldOverlay requires a Cesium viewer with scene.postRender');
+  const camera = viewer ? findCamera(viewer) : null;
+  const frame = viewer ? findFrame(viewer) : null;
+  const query = viewer ? findQuery(viewer) : null;
+  if (!camera || !frame || !query) {
+    throw new TypeError(
+      'initWorldOverlay requires a viewer with a renderer (camera, frame and query ports)',
+    );
   }
   if (_viewer === viewer && _canvas && _removePostRender) return;
   if (_viewer) destroyWorldOverlay();
   _destroyed = false;
   _viewer = viewer;
+  _camera = camera;
+  _frame = frame;
+  _query = query;
   ensureOverlayDom();
-  _occluder = new Cesium.EllipsoidalOccluder(
-    Cesium.Ellipsoid.WGS84,
-    viewer.camera?.positionWC || new Cesium.Cartesian3(),
-  );
+  _occluder = _horizon;
   _cockpitActive = !!document.body?.classList?.contains('cockpit-mode');
   _cockpitModeHandler = (event) => {
     _cockpitActive = event?.detail?.active === true;
     invalidateHost();
   };
   window.addEventListener('gev:cockpit-mode-changed', _cockpitModeHandler);
-  _removePostRender = viewer.scene.postRender.addEventListener(drawWorldOverlay);
-  if (viewer.camera?.moveEnd?.addEventListener) {
-    _removeMoveEnd = viewer.camera.moveEnd.addEventListener(() => invalidateHost());
-  }
+  _removePostRender = frame.on('postRender', () => drawWorldOverlay());
+  // Click handlers read the card painted on top through the pick registry.
+  setClickCardHitTest(hitTestWorldOverlay);
+  _removeMoveEnd = camera.on('moveEnd', () => invalidateHost());
   installUiOccluderObservers();
   // The backing store and the occluder inventory are both deferred to the
   // first frame with real paint work: a dormant host must not hold a
@@ -2228,6 +2891,8 @@ export function initWorldOverlay(viewer) {
 
 /** Remove all listeners, observers, entries, diagnostics, and overlay DOM. */
 export function destroyWorldOverlay() {
+  if (_sonarRenderTimer !== null) clearTimeout(_sonarRenderTimer);
+  _sonarRenderTimer = null;
   // Tearing down a host that was never initialized must not arm the
   // post-destroy guard: sources are allowed to publish before the first
   // `initWorldOverlay`, and that buffering has to survive a stray destroy.
@@ -2253,14 +2918,17 @@ export function destroyWorldOverlay() {
   if (_occluderRefreshTimer != null) clearTimeout(_occluderRefreshTimer);
   _occluderRefreshTimer = null;
   _root?.remove?.();
-  _accessibilityRoot?.remove?.();
   // The detection surface is not a child of `_root` (it lives in the Cesium
   // container so its `screen` blend reaches the scene), so it has to be torn
   // down explicitly rather than by the root's removal.
   _detectionSurface?.remove?.();
-  if (typeof window !== 'undefined' && window.__gevWorldOverlay?.getDiagnostics === getWorldOverlayDiagnostics) {
+  if (
+    typeof window !== 'undefined' &&
+    window.__gevWorldOverlay?.getDiagnostics === getWorldOverlayDiagnostics
+  ) {
     delete window.__gevWorldOverlay;
   }
+  syncPaintVisibility(false);
   _sources.clear();
   _sourceList.length = 0;
   for (let i = 0; i < _customPaintLaneList.length; i++) {
@@ -2288,9 +2956,11 @@ export function destroyWorldOverlay() {
   _accessibleActivatorByKey.clear();
   _accessibilitySignature = '';
   _paintRectByKey.clear();
+  _queuedItemBySource.clear();
   _paintCount = 0;
   _paintRectCount = 0;
   _hitRectCount = 0;
+  setClickCardHitTest(null);
   _uiOcclusionRects.length = 0;
   _uiOcclusionRectPool.length = 0;
   _destroyed = hadHost || _destroyed;
@@ -2298,15 +2968,17 @@ export function destroyWorldOverlay() {
   _root = null;
   _canvas = null;
   _ctx = null;
-  _accessibilityRoot = null;
-  _accessibilityList = null;
-  _accessibilityStatus = null;
+  if (_actions) presentActions(null);
   _detectionSurface = null;
   _detectionCtx = null;
   _occluder = null;
-  _occluderCameraX = Number.NaN;
-  _occluderCameraY = Number.NaN;
-  _occluderCameraZ = Number.NaN;
+  _camera = null;
+  _frame = null;
+  _query = null;
+  _eye.x = 0;
+  _eye.y = 0;
+  _eye.z = 0;
+  _eyeHeight = Number.NaN;
   _keyhole = null;
   _keyholeWidth = -1;
   _keyholeHeight = -1;
@@ -2334,6 +3006,7 @@ export function destroyWorldOverlay() {
   _customPaintFrame.dpr = 1;
   _customPaintFrame.timestamp = 0;
   _customPaintFrame.cameraPosition = null;
+  _customPaintFrame.cameraHeight = Number.NaN;
   _customPaintFrame.occluder = null;
   _customPaintFrame.keyhole = null;
   _customPaintFrame.uiRectCount = 0;

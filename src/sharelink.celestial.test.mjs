@@ -1,12 +1,26 @@
+import { DisplayBindings } from './ui/displayBindings.js';
+import { LocationNavigation } from './ui/locationNavigation.js';
+import { VisualSettings } from './ui/visualSettings.js';
+import { readShellSource, shellMethod } from './testSupport/readShellSource.mjs';
+import { _claimContextVisualAuthority, setContextMode } from './ui/contextActions.js';
+import { _initGlobalContextPanel } from './ui/contextBindings.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { ShareLinkManager, decodeShareCreatedAtMs } from './sharelink.js';
 import { createDefaultLayerState } from './data/layerState.js';
+import { parseSharePath } from './share/shareLinkPath.js';
+import { decodeShareView } from './share/viewCodec.js';
+import { bindFakeCesiumCamera } from './testSupport/fakeCameraPort.mjs';
 
-const uiSource = fs.readFileSync(new URL('./ui.js', import.meta.url), 'utf8');
+/** The decoded view of a copied `/share/<code>` link. */
+const sharedState = (href) =>
+  decodeShareView(parseSharePath(new URL(href).pathname).code).state;
+
+const uiSource = readShellSource();
 
 function sourceBlock(start, end) {
+  const name = start.trim().match(/^(?:async )?(\w+)\(/)?.[1];
+  if (typeof shellMethod(name) === 'function') return shellMethod(name).toString();
   const startIndex = uiSource.indexOf(start);
   const endIndex = uiSource.indexOf(end, startIndex + start.length);
   assert.ok(startIndex >= 0, `missing source block start: ${start}`);
@@ -25,8 +39,8 @@ function assertClaimsBefore(block, mutation, label) {
 function makeManager(hash = '') {
   globalThis.window = { location: { hash, href: `http://localhost/${hash}` } };
   globalThis.history = {
-    replaceState(_state, _title, nextHash) {
-      window.location.hash = nextHash;
+    replaceState(_state, _title, next) {
+      window.location.hash = new URL(next, window.location.href).hash;
     },
   };
   const viewer = {
@@ -38,7 +52,7 @@ function makeManager(hash = '') {
       roll: 0,
     },
   };
-  return new ShareLinkManager(viewer);
+  return new ShareLinkManager(bindFakeCesiumCamera(viewer));
 }
 
 function installClipboard(writeText) {
@@ -59,7 +73,7 @@ test('share links parse explicit celestial on and off states', () => {
 });
 
 test('unknown-only v2 layer tokens are invalid, while historical l fields stay inert', () => {
-  const invalid = makeManager('#v=2&lat=10&lon=20&l=z').parseInitialHash();
+  const invalid = makeManager('#v=2&lat=10&lon=20&l=unknown').parseInitialHash();
   assert.equal(invalid.layerState, null);
   assert.equal(invalid.layerStateInvalid, true);
   for (const hash of ['#lat=10&lon=20&l=z', '#v=1&lat=10&lon=20&l=z']) {
@@ -67,6 +81,68 @@ test('unknown-only v2 layer tokens are invalid, while historical l fields stay i
     assert.equal(legacy.layerState, null);
     assert.equal(legacy.layerStateInvalid, false);
   }
+});
+
+test('malformed v2 layer lists mark the whole incoming share payload invalid', () => {
+  for (const layers of ['.f', 'f.', 'f..c', 'f.f']) {
+    const parsed = makeManager(
+      `#v=2&lat=10&lon=20&l=${layers}`,
+    ).parseInitialHash();
+    assert.equal(parsed.layerState, null, `l=${layers}`);
+    assert.equal(parsed.layerStateInvalid, true, `l=${layers}`);
+  }
+  for (const layers of ['l=f&l=f', 'l=f&l=unknown', 'l=&l=f']) {
+    const parsed = makeManager(
+      `#v=2&lat=10&lon=20&${layers}`,
+    ).parseInitialHash();
+    assert.equal(parsed.layerState, null, layers);
+    assert.equal(parsed.layerStateInvalid, true, layers);
+  }
+});
+
+test('Nepal locator token is valid in v2 share links', () => {
+  const parsed = makeManager('#v=2&lat=10&lon=20&l=z').parseInitialHash();
+  assert.deepEqual(parsed.layerState.enabledLayerIds, ['bhote-koshi-locator']);
+  assert.equal(parsed.layerStateInvalid, false);
+});
+
+test('scope feather above 100% survives share parsing and serialization', () => {
+  const manager = makeManager('#v=2&lat=10&lon=20&sc=0&scf=200');
+  const parsed = manager.parseInitialHash();
+  assert.equal(parsed.scopeEnabled, false);
+  assert.equal(parsed.scopeFeatherPct, 200);
+  assert.equal(makeManager('#lat=10&lon=20&scf=175').parseInitialHash().scopeFeatherPct, 175);
+  assert.equal(makeManager('#lat=10&lon=20&scf=999').parseInitialHash().scopeFeatherPct, 200);
+  manager.onToggleChange(false, true, { scopeEnabled: false, scopeFeatherPct: 200 });
+  const params = manager._buildHashParams();
+  assert.equal(params.get('sc'), '0');
+  assert.equal(params.get('scf'), '200');
+  manager.onToggleChange(false, true, { scopeFeatherPct: 999 });
+  assert.equal(manager._buildHashParams().get('scf'), '200');
+  clearTimeout(manager._debounceTimer);
+});
+
+test('scope opacity rides as sco only below full, and through the compact link', () => {
+  // Links without `sco`, every link made before it, open at full opacity.
+  assert.equal(makeManager('#v=2&lat=10&lon=20&scf=35').parseInitialHash().scopeOpacityPct, 100);
+  assert.equal(makeManager('#v=2&lat=10&lon=20&sco=40').parseInitialHash().scopeOpacityPct, 40);
+  assert.equal(makeManager('#v=2&lat=10&lon=20&sco=250').parseInitialHash().scopeOpacityPct, 100);
+  assert.equal(makeManager('#v=2&lat=10&lon=20&sco=-3').parseInitialHash().scopeOpacityPct, 0);
+  assert.equal(makeManager('#v=2&lat=10&lon=20&sco=x').parseInitialHash().scopeOpacityPct, 100);
+
+  const manager = makeManager();
+  manager.onToggleChange(false, true, {});
+  const before = manager._buildHashParams().toString();
+  assert.equal(manager._buildHashParams().has('sco'), false, 'full opacity writes nothing');
+  manager.onToggleChange(false, true, { scopeOpacityPct: 100 });
+  assert.equal(manager._buildHashParams().toString(), before);
+  manager.onToggleChange(false, true, { scopeOpacityPct: 45.4 });
+  assert.equal(manager._buildHashParams().get('sco'), '45');
+  assert.equal(sharedState(manager.buildLink()).scopeOpacityPct, 45);
+  manager.onToggleChange(false, true, { scopeOpacityPct: 100 });
+  assert.equal(manager._buildHashParams().has('sco'), false);
+  assert.equal(sharedState(manager.buildLink()).scopeOpacityPct, 100);
+  clearTimeout(manager._debounceTimer);
 });
 
 test('share-link serialization emits the current celestial state', () => {
@@ -80,6 +156,37 @@ test('share-link serialization emits the current celestial state', () => {
   clearTimeout(manager._debounceTimer);
   manager._updateHash();
   assert.equal(new URLSearchParams(window.location.hash.slice(1)).get('cr'), '1');
+});
+
+test('Sonar beside the HUD layout rides as hs only when on, and through the compact link', async () => {
+  // Links made before `hs` name no Sonar.
+  assert.equal(makeManager('#v=2&lat=10&lon=20&hud=minimal').parseInitialHash().hudSonar, false);
+  assert.equal(makeManager('#v=2&lat=10&lon=20&hud=minimal&hs=1').parseInitialHash().hudSonar, true);
+
+  const manager = makeManager();
+  manager.onToggleChange(false, false, { hudVariant: 'minimal', hudSonar: false });
+  assert.equal(manager._buildHashParams().has('hs'), false, 'off writes nothing');
+  assert.equal(sharedState(manager.buildLink()).hudSonar, false);
+  manager.onToggleChange(false, false, { hudVariant: 'minimal', hudSonar: true });
+  assert.equal(manager._buildHashParams().get('hs'), '1');
+  const shared = sharedState(manager.buildLink());
+  assert.equal(shared.hudVariant, 'minimal');
+  assert.equal(shared.hudSonar, true);
+  // Tactical with Sonar is written as the Cyber layout code alone.
+  manager.onToggleChange(false, false, { hudVariant: 'cyber', hudSonar: false });
+  assert.equal(manager._buildHashParams().get('hud'), 'cyber');
+  assert.equal(manager._buildHashParams().has('hs'), false);
+  assert.equal(sharedState(manager.buildLink()).hudVariant, 'cyber');
+  clearTimeout(manager._debounceTimer);
+
+  // The restore hands it to the visual settings beside the layout.
+  const opened = makeManager('#v=2&lat=40&lon=-74&hud=minimal&hs=1');
+  let restored = null;
+  opened._onRestore = (state) => { restored = state; };
+  opened._isNavigationCurrent = () => false;
+  await opened.applyState(opened.parseInitialHash(), { navigationToken: 1 });
+  assert.equal(restored.hudVariant, 'minimal');
+  assert.equal(restored.hudSonar, true);
 });
 
 test('generated links are v2 and include deterministic layers, options, style params, and panels', () => {
@@ -121,6 +228,71 @@ test('visual parameters, explicit empty layers, and panel state are v2-only', ()
   assert.equal(legacy.layerState, null);
   assert.equal(legacy.styleParams, null);
   assert.equal(legacy.panelState, null);
+});
+
+// The panel chrome shares every rail panel, so the link registry must know
+// each one: a collapsed Recent Imagery panel used to restore expanded because
+// the encoder had no token for it.
+test('a collapsed Recent Imagery panel survives the share-link round trip beside the older panels', () => {
+  const manager = makeManager();
+  manager.setPanelStateProvider(() => ({ specs: [
+    { id: 'cctv-panel', collapsed: false },
+    { id: 'recent-imagery-panel', collapsed: true },
+    { id: 'global-context-panel', collapsed: true },
+  ] }));
+  clearTimeout(manager._debounceTimer);
+  manager._updateHash();
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  assert.equal(params.get('ui'), 'v.c.0_i.c.1_g.c.1');
+  const restored = makeManager(`#v=2&lat=10&lon=20&ui=${params.get('ui')}`)
+    .parseInitialHash();
+  assert.deepEqual(restored.panelState, { specs: [
+    { id: 'cctv-panel', collapsed: false, pinned: null },
+    { id: 'recent-imagery-panel', collapsed: true, pinned: null },
+    { id: 'global-context-panel', collapsed: true, pinned: null },
+  ] });
+  // A link written before the token existed decodes exactly as it did.
+  const older = makeManager('#v=2&lat=10&lon=20&ui=v.c.1_g.c.0').parseInitialHash();
+  assert.deepEqual(older.panelState, { specs: [
+    { id: 'cctv-panel', collapsed: true, pinned: null },
+    { id: 'global-context-panel', collapsed: false, pinned: null },
+  ] });
+});
+
+test('a collapsed Street Level panel survives the share-link round trip', () => {
+  const manager = makeManager();
+  manager.setPanelStateProvider(() => ({ specs: [
+    { id: 'cctv-panel', collapsed: false },
+    { id: 'street-level-panel', collapsed: true },
+  ] }));
+  clearTimeout(manager._debounceTimer);
+  manager._updateHash();
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  assert.equal(params.get('ui'), 'v.c.0_t.c.1');
+  const restored = makeManager(`#v=2&lat=10&lon=20&ui=${params.get('ui')}`)
+    .parseInitialHash();
+  assert.deepEqual(restored.panelState, { specs: [
+    { id: 'cctv-panel', collapsed: false, pinned: null },
+    { id: 'street-level-panel', collapsed: true, pinned: null },
+  ] });
+});
+
+test('an open Space Missions panel survives the share-link round trip', () => {
+  const manager = makeManager();
+  manager.setPanelStateProvider(() => ({ specs: [
+    { id: 'global-context-panel', collapsed: true },
+    { id: 'space-missions-panel', collapsed: false },
+  ] }));
+  clearTimeout(manager._debounceTimer);
+  manager._updateHash();
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  assert.equal(params.get('ui'), 'g.c.1_n.c.0');
+  const restored = makeManager(`#v=2&lat=10&lon=20&ui=${params.get('ui')}`)
+    .parseInitialHash();
+  assert.deepEqual(restored.panelState, { specs: [
+    { id: 'global-context-panel', collapsed: true, pinned: null },
+    { id: 'space-missions-panel', collapsed: false, pinned: null },
+  ] });
 });
 
 test('camera-only, partial, and malformed panel shares remain valid incoming state', () => {
@@ -184,7 +356,7 @@ test('incoming state suppresses premature hash replacement until restoration', (
 test('a shared view reserves its own camera without cancelling its saved Follow', () => {
   assert.match(
     uiSource,
-    /_beginDeferredNavigation\(\s*'shared view',\s*\{ cancelPendingSelection: false \},\s*\)/,
+    /_beginDeferredNavigation\(\s*'shared view',\s*\{\s*cancelPendingSelection: false,?\s*\},?\s*\)/,
   );
   const deferred = sourceBlock(
     "  _beginDeferredNavigation(noun = 'location', { cancelPendingSelection = true } = {}) {",
@@ -192,7 +364,7 @@ test('a shared view reserves its own camera without cancelling its saved Follow'
   );
   // The shared view's own `cancelPendingSelection` must reach the stamp; other
   // stamp options may ride alongside it.
-  assert.match(deferred, /_stampNavigation\(\{ cancelPendingSelection[^)]*\}\)/);
+  assert.match(deferred, /_stampNavigation\(\{\s*cancelPendingSelection[^)]*\}\)/);
 });
 
 test('copy timestamp parsing is strict and rejects malformed or future values', () => {
@@ -217,8 +389,8 @@ test('copy adds a fresh ephemeral timestamp without aging the live URL', async (
 
   assert.equal(await manager.copyLink({ nowMs: 2_000_000 }), true);
   assert.equal(await manager.copyLink({ nowMs: 2_002_000 }), true);
-  assert.equal(new URL(copied[0]).hash.includes('at=2000'), true);
-  assert.equal(new URL(copied[1]).hash.includes('at=2002'), true);
+  assert.equal(sharedState(copied[0]).sharedAtMs, 2_000_000);
+  assert.equal(sharedState(copied[1]).sharedAtMs, 2_002_000);
   assert.equal(window.location.hash, liveHash);
   assert.equal(new URLSearchParams(window.location.hash.slice(1)).has('at'), false);
 });
@@ -230,8 +402,7 @@ test('copy snapshots current state while incoming hash writes are still suppress
   manager.parseInitialHash();
   assert.equal(manager._initialRestorePending, true);
   assert.equal(await manager.copyLink({ nowMs: 3_000_000 }), true);
-  const params = new URL(copied).hash.slice(1);
-  assert.equal(new URLSearchParams(params).get('at'), '3000');
+  assert.equal(sharedState(copied).sharedAtMs, 3_000_000);
   assert.equal(window.location.hash, '#v=2&lat=10&lon=20&l=e&at=100');
 });
 
@@ -285,7 +456,7 @@ test('keyhole fade controls default and round-trip as normalized percentages', (
   assert.equal(params.get('ko'), '30');
 });
 
-// ── `sce` is a BAND, not a free number (second review) ───────────────────────
+// ── `sce` is a BAND, not a free number (review round 2) ───────────────────────
 //
 // The terminus is documented and supported as 94..100. Parsing clamped to
 // 0..100, so `sce=0` produced an unsupported sub-94 terminus — a hole in the
@@ -345,7 +516,7 @@ test('share-link restore forces a final stationary render for Google 3D Tiles', 
     },
     scene: { requestRender() { calls.renders += 1; } },
   };
-  const manager = new ShareLinkManager(viewer);
+  const manager = new ShareLinkManager(bindFakeCesiumCamera(viewer));
   manager.applyState({
     lat: 40.7669,
     lon: -73.9909,
@@ -357,12 +528,13 @@ test('share-link restore forces a final stationary render for Google 3D Tiles', 
 
   assert.ok(calls.flyTo, 'restore must start a camera flight');
   assert.equal(typeof calls.flyTo.complete, 'function');
+  const rendersInFlight = calls.renders;
   calls.flyTo.complete();
   assert.deepEqual(calls.setView, {
     destination: calls.flyTo.destination,
     orientation: calls.flyTo.orientation,
   });
-  assert.equal(calls.renders, 1);
+  assert.equal(calls.renders, rendersInFlight + 1, 'one render at rest');
 });
 
 test('newer navigation suppresses delayed share camera while non-camera state still restores', async () => {
@@ -374,7 +546,7 @@ test('newer navigation suppresses delayed share camera while non-camera state st
       flyTo() { flights += 1; },
     },
   };
-  const manager = new ShareLinkManager(viewer, {
+  const manager = new ShareLinkManager(bindFakeCesiumCamera(viewer), {
     onRestore: (state) => { restored = state; },
     isNavigationCurrent: () => false,
   });
@@ -417,18 +589,19 @@ test('newer visual, map, and individual panel actions suppress only their owned 
 test('every explicit visual UI gesture claims restore authority before it mutates state', () => {
   const initUi = sourceBlock('  _initUI() {', '  _initMapStackControl() {');
   const gestureRoutes = [
-    ["if (e.key.toLowerCase() === 'h')", "if (e.key.toLowerCase() === 'o')", 'this.hud.toggle()', 'HUD hotkey'],
-    ["if (e.key.toLowerCase() === 'd')", "if (e.key.toLowerCase() === 'c')", 'cycleDetectionMode()', 'detection hotkey'],
-    ['// Bloom toggle', '// Bloom intensity slider', 'this._setBloomEnabled(', 'bloom button'],
-    ['// Bloom intensity slider', '// Sharpen toggle', 'this._setBloomIntensity(', 'bloom slider'],
-    ['// Sharpen toggle', '// Scope mask', 'this._setSharpenEnabled(', 'sharpen button'],
-    ["this._scopeBtn?.addEventListener('click'", "this._scopeFeatherSlider?.addEventListener('input'", 'setScopeMaskEnabled(', 'scope button'],
-    ["this._scopeFeatherSlider?.addEventListener('input'", 'if (this._sharpenSlider)', 'setScopeMaskFeather(', 'scope feather slider'],
-    ["this._sharpenSlider.addEventListener('input'", 'if (this._hudLayoutSelect)', 'this._applySharpenIntensity(', 'sharpen slider'],
-    ["this._hudLayoutSelect.addEventListener('change'", 'if (this._cleanViewBtn)', 'this._setHudVariant(', 'HUD layout select'],
-    ["this._detectionDensitySlider.addEventListener('input'", 'for (const button of this._detectionAllocationBtns)', 'this._applyDetectionDensityFromUi()', 'detection density slider'],
-    ["button.addEventListener('click'", 'for (const slider of [this._detectionFadeSlider', 'this._setDetectionAllocation(', 'detection allocation button'],
-    ["slider?.addEventListener('input'", 'if (this._celestialBtn)', 'this._applyDetectionFadeFromUi()', 'detection fade controls'],
+    ['toggleHud: () => {', 'toggleOrbit: () =>', 'this.hud.toggle()', 'HUD hotkey'],
+    ['cycleDetection: () => {', 'toggleCctv: () =>', 'cycleDetectionMode()', 'detection hotkey'],
+    ['toggleSonar:', 'setSonarRings:', 'this._setCyberSonarEnabled(', 'Sonar toggle'],
+    ['toggleBloom:', 'setBloomIntensity:', 'this._setBloomEnabled(', 'toggleBloom control'],
+    ['setBloomIntensity:', 'toggleSharpen:', 'this._setBloomIntensity(', 'setBloomIntensity control'],
+    ['toggleSharpen:', 'setScopeEnabled:', 'this._setSharpenEnabled(', 'toggleSharpen control'],
+    ['setScopeEnabled:', 'setScopeFeather:', 'this._setScope(', 'setScopeEnabled control'],
+    ['setScopeFeather:', 'setSharpenIntensity:', 'this._setScope(', 'setScopeFeather control'],
+    ['setSharpenIntensity:', 'setHudLayout:', 'this._setSharpenIntensity(', 'setSharpenIntensity control'],
+    ['setHudLayout:', 'toggleCleanView:', 'this._setHudVariant(', 'setHudLayout control'],
+    ['setDensity:', 'setAllocation:', 'this._setDetectionDensity(', 'setDensity control'],
+    ['setAllocation:', 'setFade:', 'this._setDetectionAllocation(', 'setAllocation control'],
+    ['setFade:', 'toggleCelestial:', 'this._setDetectionFade(', 'setFade control'],
   ];
   for (const [start, end, mutation, label] of gestureRoutes) {
     const startIndex = initUi.indexOf(start);
@@ -437,23 +610,10 @@ test('every explicit visual UI gesture claims restore authority before it mutate
     assertClaimsBefore(initUi.slice(startIndex, endIndex), mutation, label);
   }
 
-  const hudToggle = sourceBlock('  _initHUDToggle() {', '  _initCockpitDisplayPortal() {');
-  assertClaimsBefore(
-    hudToggle.slice(
-      hudToggle.indexOf("this._hudBtn.addEventListener('click'"),
-      hudToggle.indexOf('if (this._hudLayoutSelect)'),
-    ),
-    'this.hud.toggle()',
-    'HUD button',
-  );
-  assertClaimsBefore(
-    hudToggle.slice(
-      hudToggle.indexOf("this._detectionBtn.addEventListener('click'"),
-      hudToggle.indexOf('this._cockpitDisplayToggleBtn'),
-    ),
-    'cycleDetectionMode()',
-    'detection button',
-  );
+  const displayActions = initUi.slice(initUi.indexOf('const token = store.connect('));
+  assertClaimsBefore(displayActions.slice(displayActions.indexOf('toggleHud:'), displayActions.indexOf('cycleDetection:')), 'this.hud.toggle()', 'HUD button');
+  assertClaimsBefore(displayActions.slice(displayActions.indexOf('cycleDetection:'), displayActions.indexOf('toggleModels:')), 'cycleDetectionMode()', 'detection button');
+
 });
 
 // Contacts OWNS detection while it is active (forced Dense @ 75%). That makes
@@ -477,30 +637,22 @@ test('explicit Context transitions claim the visual restore lane before transiti
     assert.ok(claimIndex < mutationIndex, `${label} must claim before mutation`);
   };
 
-  const helper = sourceBlock(
-    '  _claimContextVisualAuthority() {',
-    '  async _selectContextMode(mode, {',
-  );
+  const helper = _claimContextVisualAuthority.toString();
   assert.ok(
-    helper.includes("claimRestoreLane?.('visual')"),
+    helper.includes('this.actions.claimVisualAuthority()'),
     'the Context authority helper must claim the visual lane',
   );
 
-  const contextPanel = sourceBlock('  _initGlobalContextPanel() {', '  async _runUserFacingContextAction(');
-  for (const [start, end, label] of [
-    ["this._globalContextFlightsBtn?.addEventListener('click'", "this._globalContextMissionsBtn?.addEventListener('click'", 'Contacts tab'],
-    ["this._globalContextMissionsBtn?.addEventListener('click'", 'CONTEXT_PANEL_END', 'Space Missions tab'],
-  ]) {
-    const startIndex = contextPanel.indexOf(start);
-    const endIndex = end === 'CONTEXT_PANEL_END'
-      ? contextPanel.length
-      : contextPanel.indexOf(end, startIndex + start.length);
-    assert.ok(startIndex >= 0 && endIndex > startIndex, `${label} route is missing`);
-    assertContextClaimsBefore(contextPanel.slice(startIndex, endIndex), 'this._selectContextMode(', label);
-  }
+  assert.match(uiSource, /claimVisualAuthority: \(\) =>\s*this\.shareLinkManager\?\.claimRestoreLane\?\.\('visual'\)/);
+  const contextPanel = _initGlobalContextPanel.toString();
+  const contacts = contextPanel.slice(
+    contextPanel.indexOf("this.listen(this._globalContextFlightsBtn, 'click'"),
+    contextPanel.indexOf("this.listen(this._installationsSearchBtn, 'click'"),
+  );
+  assertContextClaimsBefore(contacts, 'this._selectContextMode(', 'Contacts tab');
 
   // The voice/tool facade validates the mode first, then transitions.
-  const facade = sourceBlock('  async setContextMode(mode, {', '  getCockpitState() {');
+  const facade = setContextMode.toString();
   assertContextClaimsBefore(facade, 'this._selectContextMode(', 'setContextMode facade');
   // Authority is taken per validated branch, never ahead of validation. The
   // OFF branch is validated by its own guard; the named-mode branch must claim
@@ -530,8 +682,8 @@ test('explicit Context transitions claim the visual restore lane before transiti
 // detection: `_detectionUserOverridden` is what suppresses the military-style
 // auto-enable for the rest of the session. Contacts entry is not that.
 test('Context lane claims never set the session detection-override flag', () => {
-  const contextPanel = sourceBlock('  _initGlobalContextPanel() {', '  async _runUserFacingContextAction(');
-  const facade = sourceBlock('  async setContextMode(mode, {', '  getCockpitState() {');
+  const contextPanel = _initGlobalContextPanel.toString();
+  const facade = setContextMode.toString();
   for (const [block, label] of [
     [contextPanel, 'Context panel'],
     [facade, 'setContextMode facade'],
@@ -549,7 +701,7 @@ test('every explicit visual control facade claims restore authority before mutat
     ['  setHudLayout(variantName) {', '  getDetectionState() {', 'this._setHudVariant(', 'setHudLayout'],
     ['  setDetection({ enabled, mode, densityPct, allocationStrategy, fadePct, outsideOpacityPct } = {}) {', '  async setMapStack(stackId) {', 'this._setDetectionAllocation(', 'setDetection'],
     ['  setBloom({ enabled, intensityPct } = {}) {', '  setSharpen({ enabled, intensityPct } = {}) {', 'this._setBloomIntensity(', 'setBloom'],
-    ['  setSharpen({ enabled, intensityPct } = {}) {', '  get celestialRingEnabled() {', 'this._applySharpenIntensity(', 'setSharpen'],
+    ['  setSharpen({ enabled, intensityPct } = {}) {', '  get celestialRingEnabled() {', 'this._setSharpenIntensity(', 'setSharpen'],
     ['  setCelestialRingEnabled(enabled, { syncShare = true, focus = false } = {}) {', '  setOrbit(enabled) {', 'this.celestialRing?.setEnabled(', 'setCelestialRingEnabled'],
   ];
   for (const [start, end, mutation, label] of facadeRoutes) {
@@ -558,8 +710,8 @@ test('every explicit visual control facade claims restore authority before mutat
 
   const style = sourceBlock('  setStyle(styleName, {', '  _startTransition(styleName, fromValue, toValue) {');
   assertClaimsBefore(style, 'this.activeStyle = styleName', 'setStyle');
-  const sliders = sourceBlock('  _updateSliderPanel(styleName, { reveal = false } = {}) {', '  _revealStyleParameters() {');
-  assertClaimsBefore(sliders, 'this.stages[styleName].uniforms[uName] = val', 'style parameter slider');
+  const sliders = sourceBlock('  setStyleParameter(name, value) {', '  _revealStyleParameters() {');
+  assertClaimsBefore(sliders, 'this.stages[parameters.style].uniforms[name] = value', 'style parameter slider');
 });
 
 test('public visual facades reject the complete invalid request before authority or mutation', () => {
@@ -619,7 +771,7 @@ test('share apply completion waits for both callback work and camera settlement'
     },
     scene: { requestRender() {} },
   };
-  const manager = new ShareLinkManager(viewer, { onRestore: () => restoreGate });
+  const manager = new ShareLinkManager(bindFakeCesiumCamera(viewer), { onRestore: () => restoreGate });
   let settled = false;
   const applying = manager.applyState({
     lat: 40, lon: -74, alt: 500, heading: 0, pitch: -30, roll: 0,
@@ -648,7 +800,7 @@ test('a later navigation prevents share completion from resetting the final pose
     },
     scene: { requestRender() {} },
   };
-  const manager = new ShareLinkManager(viewer, {
+  const manager = new ShareLinkManager(bindFakeCesiumCamera(viewer), {
     isNavigationCurrent: (token) => token === generation,
   });
   manager.applyState({
@@ -672,7 +824,7 @@ test('destroy cancels only a still-owned share flight and ignores delayed comple
     },
     scene: { requestRender() {} },
   };
-  const manager = new ShareLinkManager(viewer, {
+  const manager = new ShareLinkManager(bindFakeCesiumCamera(viewer), {
     isNavigationCurrent: (token) => token === generation,
     cancelOwnedNavigation: () => { cancellations += 1; flight?.cancel?.(); },
   });
@@ -684,7 +836,7 @@ test('destroy cancels only a still-owned share flight and ignores delayed comple
   assert.equal(cancellations, 1);
   assert.equal(setViews, 0);
 
-  const newerManager = new ShareLinkManager(viewer, {
+  const newerManager = new ShareLinkManager(bindFakeCesiumCamera(viewer), {
     isNavigationCurrent: (token) => token === generation,
     cancelOwnedNavigation: () => { cancellations += 1; },
   });
@@ -694,4 +846,40 @@ test('destroy cancels only a still-owned share flight and ignores delayed comple
   generation = 8;
   newerManager.destroy();
   assert.equal(cancellations, 1, 'newer navigation must not be cancelled');
+});
+
+
+test('visual input listeners are revoked before asynchronous UI teardown', () => {
+  const disposal = uiSource.slice(uiSource.indexOf('  async dispose() {'));
+  const firstAwait = disposal.indexOf('await ');
+  assert.ok(firstAwait > 0);
+  const synchronous = disposal.slice(0, firstAwait);
+  assert.match(synchronous, /this\._displayBindings\.destroy\(\)/);
+  assert.match(synchronous, /this\._visualSettings\.stop\(\)/);
+  assert.match(synchronous, /this\._mapSourceControls\?\.destroy\(\)/);
+  assert.match(synchronous, /this\._releaseGlobeActions\(\)/);
+  assert.match(synchronous, /this\._locationNavigation\.destroy\(\)/);
+  assert.match(LocationNavigation.prototype.destroy.toString(), /this\._locationControls\?\.destroy\(\)/);
+  assert.match(LocationNavigation.prototype.destroy.toString(), /this\._locationLookup\?\.destroy\(\)/);
+  assert.match(DisplayBindings.prototype.destroy.toString(), /this\._detachDisplayControls\?\.\(\)/);
+  assert.match(DisplayBindings.prototype.destroy.toString(), /this\._applicationShortcuts\?\.destroy\(\)/);
+  assert.match(VisualSettings.prototype.stop.toString(), /this\.store\.detach\(this\._parametersToken\)/);
+  assert.match(VisualSettings.prototype.stop.toString(), /this\._visualEffects\.stop\(\)/);
+});
+
+
+test('share restore rejects inherited styles while continuing later fields', () => {
+  for (const style of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'unknown']) {
+    const restored = makeManager(`#lat=10&lon=20&style=${style}&cr=1`).parseInitialHash();
+    assert.equal(restored.style, 'normal');
+    assert.equal(restored.celestialRing, true);
+  }
+});
+
+test('programmatic invalid styles are ignored before changing visual state', () => {
+  const target = { activeStyle: 'normal' };
+  for (const value of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'unknown', {}, null, () => {}]) {
+    assert.doesNotThrow(() => VisualSettings.prototype.setStyle.call(target, value));
+    assert.equal(target.activeStyle, 'normal');
+  }
 });
