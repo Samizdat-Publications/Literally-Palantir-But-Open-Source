@@ -1,0 +1,116 @@
+[
+ {
+  "name": "A-midtown",
+  "style": "normal",
+  "layers": {
+   "flights": true
+  },
+  "warmMs": 45000,
+  "from": {
+   "lat": 40.733,
+   "lon": -74.002,
+   "alt": 660,
+   "heading": 28,
+   "pitch": -12
+  },
+  "to": {
+   "lat": 40.7372,
+   "lon": -73.9985,
+   "alt": 630,
+   "heading": 29,
+   "pitch": -12.5
+  },
+  "linear": true,
+  "block": [
+   "/api/opensky",
+   "/api/adsb",
+   "/api/flights"
+  ],
+  "frames": 120,
+  "vtStepMs": 33.333,
+  "minRenders": 2,
+  "perFrameMs": 9000,
+  "settleMs": 40000
+ },
+ {
+  "name": "B-swarm",
+  "style": "normal",
+  "layers": {
+   "satellites": true
+  },
+  "layerParams": {
+   "satellites": {
+    "catalog": "dense",
+    "showOrbits": false
+   }
+  },
+  "warmMs": 40000,
+  "from": {
+   "lat": 18,
+   "lon": -43,
+   "alt": 24000000,
+   "heading": 0,
+   "pitch": -90
+  },
+  "to": {
+   "lat": 18,
+   "lon": -37,
+   "alt": 22500000,
+   "heading": 0,
+   "pitch": -90
+  },
+  "linear": true,
+  "frames": 120,
+  "vtStepMs": 2000,
+  "minRenders": 310,
+  "perFrameMs": 5000,
+  "pointScale": 2
+ },
+ {
+  "name": "C-london-modes",
+  "style": "normal",
+  "layers": {
+   "flights": true
+  },
+  "warmMs": 35000,
+  "from": {
+   "lat": 51.4988,
+   "lon": -0.0598,
+   "alt": 520,
+   "heading": 292,
+   "pitch": -13
+  },
+  "to": {
+   "lat": 51.5,
+   "lon": -0.0662,
+   "alt": 470,
+   "heading": 289,
+   "pitch": -12
+  },
+  "linear": true,
+  "block": [
+   "/api/opensky",
+   "/api/adsb",
+   "/api/flights"
+  ],
+  "styleCycle": [
+   {
+    "frame": 24,
+    "style": "surveillance"
+   },
+   {
+    "frame": 50,
+    "style": "thermal"
+   },
+   {
+    "frame": 76,
+    "style": "noir"
+   }
+  ],
+  "frames": 120,
+  "vtStepMs": 33.333,
+  "minRenders": 2,
+  "perFrameMs": 9000,
+  "settleMs": 40000
+ }
+]

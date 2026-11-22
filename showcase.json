@@ -6,7 +6,7 @@
   "version": "0.1.0",
   "kind": "tool",
   "started": "2026-08-26",
-  "updated": "2026-10-18",
+  "updated": "2026-11-21",
   "tech": [
     "JavaScript",
     "CesiumJS",
@@ -66,6 +66,41 @@
       "what": "Landing page captures in site/media/",
       "who": "Stewart Gregerson (scripted Playwright capture of a local run)",
       "licence": "Screen captures; the map imagery and data shown stay under their providers terms, see DATA_SOURCES.md"
+    },
+    {
+      "what": "Photorealistic 3D Tiles: the 3D cities and globe in the showcase film and poster",
+      "who": "Google (Map Tiles API)",
+      "licence": "Google Maps Platform Terms of Service; attribution kept on screen"
+    },
+    {
+      "what": "Live aircraft positions in the showcase film",
+      "who": "OpenSky Network (Schaefer et al., IPSN 2014) with adsb.lol fallback",
+      "licence": "OpenSky non-commercial research licence; adsb.lol ODbL 1.0"
+    },
+    {
+      "what": "Satellite orbital elements (TLEs) in the showcase film",
+      "who": "CelesTrak (celestrak.org), Dr. T.S. Kelso",
+      "licence": "US-government-origin data, citation requested"
+    },
+    {
+      "what": "Airliner 3D model (airplane.glb) seen in the showcase film",
+      "who": "zairiq-123 (Sketchfab, \"boeing 747\"), modified for God's Eye View",
+      "licence": "CC BY 4.0"
+    },
+    {
+      "what": "Globe engine and base imagery",
+      "who": "CesiumJS and Cesium ion",
+      "licence": "CesiumJS Apache 2.0; Cesium ion terms"
+    },
+    {
+      "what": "Showcase film and poster in showcase/",
+      "who": "Stewart Gregerson (scripted frame-stepped capture of a local run)",
+      "licence": "Screen captures; the map imagery and data shown stay under their providers terms, see DATA_SOURCES.md"
     }
-  ]
+  ],
+  "models": [],
+  "media": {
+    "film": "showcase/film.mp4",
+    "poster": "showcase/poster.png"
+  }
 }
